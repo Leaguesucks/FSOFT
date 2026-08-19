@@ -5,11 +5,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter as TextSplit
 from langchain_openai import OpenAIEmbeddings as Embeddings
 from langchain_openai import ChatOpenAI as ChatModel
 from langchain_core.vectorstores import InMemoryVectorStore as VectorStore
-import os, getpass
-
-llm = ChatModel(model="gpt-5-nano", temperature=0.1, max_tokens=2000)
-embeddings = Embeddings(model="text-embedding-3-small")
-vectorStore = VectorStore(embeddings=embeddings)
+from dotenv import load_dotenv
 
 def loadDoc(filePath: str, fileType: str) -> list[Document]:
     '''
@@ -33,7 +29,7 @@ def splitDoc(documents: list[Document], chunking_mode: str = "recursive", chunk_
     The delim parameter specifies how to recursively chunk the documents.
     '''
     if chunking_mode == "recursive":
-        text_splitter = TextSplitter(separators=delim, chunk_overlap=chunk_overlap)
+        text_splitter = TextSplitter(separators=delim, keep_separator=False, chunk_overlap=chunk_overlap)
     elif chunking_mode == "fixed_size":
         text_splitter = TextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     else:
@@ -55,3 +51,29 @@ def retrieveRelevantDocs(query: list[str], vectorStore: VectorStore, top_k: int 
     '''
     retriever = vectorStore.as_retriever(search_type="similarity", search_kwargs={"k": top_k})
     return retriever.batch([query])
+
+if __name__ == "__main__":
+    load_dotenv("OpenAI_API_Keys.secrets")  # Load the API Keys 
+    llm = ChatModel(model="gpt-5-nano", temperature=0.1, max_tokens=2000)
+    embeddings = Embeddings(model="text-embedding-3-small")
+    vectorStore = VectorStore(embeddings)
+
+    doc1Path = "~/FSOFT/AI_Intern/Roadmap/AI_Eng/Foundation/Final_Asgn/documents/" \
+    "FPT_Policy_Personal_Data_Protection_Management_v35.pdf"
+    doc2Path = "~/FSOFT/AI_Intern/Roadmap/AI_Eng/Foundation/Final_Asgn/documents/" \
+    "FPT_FSoft_Human_Rights_Policy.pdf"
+
+    personalDataDocs = loadDoc(doc1Path, "pdf")
+    humanRightsDocs = loadDoc(doc2Path, "pdf")
+    storeEmbeddings(personalDataDocs, vectorStore)
+    storeEmbeddings(humanRightsDocs, vectorStore)
+
+    personalDataParagraphs = splitDoc(personalDataDocs, chunking_mode="recursive", chunk_overlap=200, delim="\n\n")
+    humanRightsParagraphs = splitDoc(humanRightsDocs, chunking_mode="recursive", chunk_overlap=200, delim="\n\n")
+    storeEmbeddings(personalDataParagraphs, vectorStore)
+    storeEmbeddings(humanRightsParagraphs, vectorStore)
+
+    personalDataLines = splitDoc(personalDataDocs, chunking_mode="recursive", chunk_overlap=200, delim="\n")
+    humanRightsLines = splitDoc(humanRightsDocs, chunking_mode="recursive", chunk_overlap=200, delim="\n")
+
+    print(llm.invoke("Hello, how are you?").content)
