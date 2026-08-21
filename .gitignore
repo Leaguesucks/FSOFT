@@ -1,2 +1,6 @@
 .venv
 *.secrets
+*.out
+*.env
+*.test
+test.py
