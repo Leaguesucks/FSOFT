@@ -3,3 +3,5 @@ langchain-core
 langchain-community
 langchain-openai
 dotenv
+llma-cloud>=2.8
+qdrant-client
