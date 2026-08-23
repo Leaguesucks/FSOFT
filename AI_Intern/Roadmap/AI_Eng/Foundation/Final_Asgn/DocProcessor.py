@@ -1,100 +1,319 @@
-from langchain_core.documents import Document
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter as TextSplitter
-from langchain_core.vectorstores import InMemoryVectorStore
 from pathlib import Path
+from dotenv import load_dotenv
+from llama_cloud import LlamaCloud
+from html import unescape
+from dataclasses import dataclass, field
+from uuid import uuid4
+from os import getenv
 
-class DocProcessor:
-    '''Class to process documents by loading and splitting them into chunks, then upload it to vector store
-    @depreciated: This class is deprecated and only kept for legacy purposes. Please use the ModernDocProcessor
+import re
+
+@dataclass
+class Heading:
+    text: str
+    type:str
+    number: str
+
+@dataclass
+class Chunk:
+    id: str
+    document_name: str
+    document_id: str
+    title: str
+    heading_type: str
+    level: int
+    owner: str | None = None # Should store the id of the parent
+    content: str = ""
+    full_content: str = ""
+    children: list[str] = field(default_factory=list) # Ids of children chunk
+    pages: list[int] = field(default_factory=list)
+
+class Parser:
     '''
-    def __init__(self, folderPath: str, fileType: list[str], db: InMemoryVectorStore):
-        self.folderPath = folderPath
-        self.fileType = fileType
-        self.db = db
-        self.unique_id_counter = 0 # Assign each document a unique Id
+    Modern class to process documents using API. This helps
+    reduce stress on local machine and can handle OCR operations.
+    '''
+    def __init__(self):
+        llama_api_keys_path = Path(".secrets/api_keys.secrets")
+        load_dotenv(llama_api_keys_path)
+        llama_api_keys = getenv("LLAMA_CLOUD_API_KEY")
 
-    def loadDoc(self, file: str, fileType: str) -> list[Document]:
+        self.client = LlamaCloud(api_key=llama_api_keys)
+
+    def loadDoc(self, filePath: str):
+        '''Load a SINGLE document then return the result'''
+        file = self.client.files.create(
+            file=Path(filePath),
+            purpose="parse"
+        )
+
+        job = self.client.parsing.create(
+            tier="agentic",
+            version="latest",
+            file_id=file.id
+        )
+
+        job = self.client.parsing.wait_for_completion(job.id)
+
+        result = self.client.parsing.get(
+            job_id=job.id,
+            expand=["markdown", "metadata"]
+        )
+
+        return result
+
+    def chunkDocHardCoded(self, result) -> list[Chunk]:
         '''
-        Load and return documents from the specified file path and type.
+        Hard coded method to chunk documents used in this assignment
         '''
+        chunks: list[Chunk] = []
+        stack: list[Chunk] = [] # Keep track of the current level
+        chunksIds: dict[str, Chunk] = {}
 
-        if fileType == "pdf":
-            loader = PyPDFLoader(file_path=file, mode="single")
-        elif fileType == "txt":
-            loader = TextLoader(file_path=file, encoding="utf-8")
-        else:
-            raise ValueError("Unsupported file type. Please use 'pdf' or 'txt'.")
-        
-        documents = loader.load()
-        return documents
+        docName = result.job.name
+        pages = result.markdown.pages
 
-    def loadAndStoreDocsInFolder(self) -> None:
-        '''
-        Load and return documents from all files in the specified folder path with the given file type then load them into the vector store.
-        Also partition the documents into smaller chunks and store them to the database.
-        '''
-        folder = Path(self.folderPath).expanduser()
-
-        if not folder.exists():
-            raise FileNotFoundError(f"The folder path \'{self.folderPath}\' does not exist.")
-
-        if not folder.is_dir():
-            raise NotADirectoryError(f"The path \'{self.folderPath}\' is not a directory.")
-
-        for file in folder.iterdir():
-            if not file.is_file():
+        for page in pages:
+            if page.page_number == 1: # Skip the first page
                 continue
 
-            fileType = file.suffix.lower().lstrip('.')
+            page_content = self.pre_filter_hardCoded(page.markdown)
 
-            if fileType in self.fileType:
-                document = self.loadDoc(str(file), fileType)
-                if document:
-                    document[0].id = str(self.unique_id_counter)
-                    self.db.add_documents(document)
-                    self.splitRecursiveLy(document[0], chunksize=1000, chunk_overlap=200)
-                    self.unique_id_counter += 1
-                    print(document[0].metadata["source"], ": ", file, ": ", len(document[0].page_content))
+            for line in page_content.splitlines():
+                line = line.strip()
 
+                if not line:
+                    continue
 
-    def splitDoc(self, document: Document, chunking_mode: str = "recursive", chunk_size: int = 1000, 
-                chunk_overlap: int = 200, delim: str = "\n\n") -> list[Document]:
+                heading = self.parse_heading(line)
+
+                # Append content if not a Heading
+                if heading is None:
+                    if not stack:
+                        continue
+                    current_chunk = stack[-1]
+
+                    if current_chunk.content:
+                        current_chunk.content += "\n"
+                    current_chunk.content += line
+
+                    if page.page_number not in current_chunk.pages:
+                        current_chunk.pages.append(page.page_number)
+                    continue
+
+                # Add a new heading
+                level = self.get_heading_level(
+                    heading=heading, 
+                    current_stack=stack)
+
+                # Remove deeper section
+                while len(stack) > level:
+                    stack.pop()
+
+                section = Chunk(
+                    id=str(uuid4()),
+                    document_name=docName,
+                    document_id="",
+                    title=heading.text,
+                    heading_type=heading.type,
+                    level=level,
+                    owner=(
+                        None
+                        if level == 0
+                        else stack[-1].id if stack else None
+                    ),
+                    content=heading.text,
+                    full_content="",
+                    children=[],
+                    pages=[page.page_number]
+                )
+
+                if level != 0 and stack:
+                    stack[-1].children.append(section.id)
+               
+                chunks.append(section)
+                chunksIds[section.id] = section
+                stack.append(section)
+
+        roots = [chunk for chunk in chunks if chunk.owner is None]
+
+        # Build complete content for each section and subsection
+        for root in roots:
+            self.recursive_add_content(chunk=root, chunks_by_id=chunksIds)
+
+        return chunks
+
+    def pre_filter_hardCoded(self, page_content: str) -> str:
         '''
-        Split the loaded documents into smaller chunks based on the specified chunking mode, size, and overlap.
-        The chunking_mode parameter currently supports only "recursive" or "fixed_size" splitting. The chunk_size and chunk_overlap parameters 
-        define the size of each chunk and the overlap between consecutive chunks, respectively.
-        The delim parameter specifies how to recursively chunk the documents.
+        Hard coded filter for the contents.
         '''
-        if chunking_mode == "recursive":
-            text_splitter = TextSplitter(separators=[delim], keep_separator=False, chunk_overlap=chunk_overlap, chunk_size=chunk_size)
-        elif chunking_mode == "fixed_size":
-            text_splitter = TextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        else:
-            raise ValueError("Unsupported chunking mode. Please use 'recursive'.")
-        
-        split_documents = text_splitter.split_documents([document])
-        return split_documents
+        unwanted = [
+            "FPT Software logo",
+            "A person in a suit holding a glowing digital "
+            "interface representing human resources and connectivity",
+            "icon",
+            "End graphic",
+            "End",
+            "A person using a tablet in front of stacked shipping containers with "
+            "digital supply chain icons overlaid",
+            "FPT SOFTWARE COMPANY LIMITED",
+            "A person using a tablet in front of stacked shipping containers with digital supply chain s overlaid",
+        ]
 
-    def splitRecursiveLy(self, document: Document, chunksize=1000,chunk_overlap=200) -> None:
+        for item in unwanted:
+            page_content = page_content.replace(item, "")
+
+         # Remove Markdown formatting
+        page_content = re.sub(r"^#{1,6}\s*", "", page_content, flags=re.MULTILINE)
+        page_content = re.sub(r"\*\*(.*?)\*\*", r"\1", page_content)
+        page_content = re.sub(r"(?<!\*)\*(?!\*)(.*?)\*(?!\*)", r"\1", page_content)
+
+        return page_content.strip()
+
+    def convert_html_table(self, html_table: str) -> list[str]:
         '''
-        Automatically split the loaded documents into paragraphs and sentences recursively. Then load them to the database.
+        Convert HTML code for a table into a flat list. First half will be header and second half will be corresponded values.
+        e.g., ['No.', 'Effective Date', 'Version', 'Change Description', 'Reason for Changes', 
+        'Reviewer', 'Approver', '1', '', '1.0', 'Newly Create', '', '', ''] 
         '''
-        paragraphs = self.splitDoc(document, chunking_mode="recursive", delim="\n", chunk_size=chunksize, chunk_overlap=chunk_overlap)
+        cells = re.findall(
+            r"<(?:td|th)[^>]*>(.*?)</(?:td|th)>",
+            html_table,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
 
-        paragraph_counter = 0
-        for paragraph in paragraphs:
-            paragraph.id = document.id + "." + str(paragraph_counter)
-            paragraph.metadata["type"] = "paragraph"
-            paragraph.metadata["parent_id"] = document.id
-            self.db.add_documents([paragraph])
-            lines = self.splitDoc(paragraph, chunking_mode="recursive", delim=".", chunk_size=chunksize, chunk_overlap=chunk_overlap)
-            paragraph_counter += 1
+        return [
+            unescape(
+                re.sub(r"<[^>]+>", "", cell)
+            ).strip()
+            for cell in cells
+        ]
 
-            line_counter = 0
-            for line in lines:
-                line.id = paragraph.id + "." + str(line_counter)
-                line.metadata["type"] = "line"
-                line.metadata["parent_id"] = paragraph.id
-                self.db.add_documents([line])
-                line_counter += 1
+    def parse_heading(self, line: str) -> Heading | None:
+        '''
+        Check if this line is a heading and return the heading type
+        '''
+        line = line.strip()
+
+        if not line:
+            return None
+
+        # Numeric
+        #
+        # 1 Policy
+        # 1.1 Policy
+        # 1.1.1 Policy
+        #
+        match = re.match(
+            r"^(\d+(?:\.\d+)*\.?)\s+(.+)$",
+            line,
+        )
+
+        if match:
+            number = match.group(1).rstrip(".")
+
+            return Heading(
+                text=line,
+                type="numeric",
+                number=number
+            )
+
+        # Roman
+        #
+        # i. Policy
+        # ii) Policy
+        # (iii) Policy
+        #
+        match = re.match(
+            r"^(?:\(([ivxlcdm]+)\)|([ivxlcdm]+)[.)])\s+(.+)$",
+            line,
+            re.IGNORECASE,
+        )
+
+        if match:
+            number = (
+                match.group(1)
+                or match.group(2)
+            ).lower()
+
+            return Heading(
+                text=line,
+                type="roman",
+                number=number,
+            )
+        # Letter
+        #
+        # a. Policy
+        # a) Policy
+        # (a) Policy
+        #
+        match = re.match(
+            r"^(?:\(([a-z])\)|([a-z])[.)])\s+(.+)$",
+            line,
+            re.IGNORECASE,
+        )
+
+        if match:
+            number = (
+                match.group(1)
+                or match.group(2)
+            ).lower()
+
+            return Heading(
+                text=line,
+                type="letter",
+                number=number,
+            )
+
+        # Article
+        match = re.match(
+            r"^Article\s+(\d+)(?:\s*[-.:]\s*(.*))?$",
+            line,
+            re.IGNORECASE,
+        )
+
+        if match:
+            number = match.group(1)
+
+            return Heading(
+                text=line,
+                type="article",
+                number=number,
+            )
+
+        return None
+
+    def get_heading_level(self, heading: Heading, current_stack: list[Chunk]) -> int:
+        '''
+        Return the current heading level, with 0 being the highest
+        '''
+
+        if heading.type == "article":
+            return 0
+
+        if heading.type == "numeric":
+            return heading.number.count(".")
+
+        if heading.type == "letter" or heading.type == "roman":
+            return len(current_stack)
+
+    def recursive_add_content(self, chunk: Chunk, chunks_by_id: dict[str, Chunk]) -> str:
+        '''
+        Recursively add content of subsections to their owners.
+        '''
+        complete_content: str = chunk.content
+
+        for child_id in chunk.children:
+            child = chunks_by_id.get(child_id)
+
+            if child is None:
+                continue
+
+            child_content = self.recursive_add_content(chunk=child, chunks_by_id=chunks_by_id)
+            if child_content:
+                if complete_content:
+                    complete_content += "\n\n"
+                complete_content += child_content
+
+        chunk.full_content = complete_content
+        return complete_content

@@ -4,4 +4,3 @@
 *.env
 *.test
 test.py
-__pycache__
