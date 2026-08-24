@@ -1,7 +1,11 @@
-.venv
+*.venv
 *.secrets
 *.out
 *.env
 *.test
+*.legacy
+*.exe
+*.o
+bin
 test.py
 __pycache__

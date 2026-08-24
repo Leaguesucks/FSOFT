@@ -70,7 +70,7 @@ if __name__ == "__main__":
 
     while True:
         query = input("[Query]: ")
-        if query.strip() == "quit":
+        if query.strip().lower() == "quit":
             break
         answer = rag.answer(query=query, limit=5)
         print("[LLM Answer]: ", answer, "\n")
