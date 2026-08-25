@@ -1,6 +1,6 @@
 #include "headers/Neuron.h"
 
-Neuron::Neuron(int n_inputs, int deviation) {
+Neuron::Neuron(int n_inputs, double deviation) {
     std::mt19937_64 rng(std::random_device{}());
     std::normal_distribution<double> dist(0.0, deviation);
 
@@ -27,9 +27,30 @@ double Neuron::weighted_sum(const std::vector<double>& inputs) {
     for (size_t i = 0; i < weights.size(); i++)
         sum += weights[i] * inputs[i];
 
+    z = sum;
     return sum;
 }
 
 std::vector<double>& Neuron::get_weights() {
     return weights;
+}
+
+double Neuron::get_z() {
+    return z;
+}
+
+double Neuron::get_a() {
+    return a;
+}
+
+void Neuron::set_a(double value) {
+    a = value;
+}
+
+double Neuron::get_da_dz() {
+    return da_dz;
+}
+
+void Neuron::set_da_dz(double value) {
+    da_dz = value;
 }

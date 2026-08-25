@@ -17,7 +17,7 @@
 class Neuron {
     private:
         std::vector<double> weights;
-        double bias;
+        double bias, z, a, da_dz;
 
     public:
         /**
@@ -25,7 +25,7 @@ class Neuron {
          * @param n_inputs The number of inputs
          * @param deviation Deviation for the randomized distribution
          */
-        Neuron(int n_inputs, int deviation);
+        Neuron(int n_inputs, double deviation);
 
         /**
          * @brief Intialize the weights with values
@@ -44,8 +44,11 @@ class Neuron {
          */
         std::vector<double>& get_weights();
 
-        /**
-         * @param z The output of this neuron
-         * @param type The type of the next layer: HIDDEN_LAYER | OUTPUT_LAYER
-         */
+        double get_z();
+
+        double get_a();
+        void set_a(double value);
+
+        double get_da_dz();
+        void set_da_dz(double value);
 };

@@ -1,7 +1,7 @@
 #include "headers/Layer.h"
 
-Layer::Layer(int n_neurons, int n_inputs, int type) : type(type) {
-    if (type < 0 || type > 2)
+Layer::Layer(int n_neurons, int n_inputs, Layer_Type type) : type(type) {
+    if (type != HIDDEN_LAYER && type != OUTPUT_LAYER)
         throw std::invalid_argument("Invalid type");
 
     double deviation = normal_Xavier_Deviation(n_inputs, n_neurons);
@@ -12,7 +12,7 @@ Layer::Layer(int n_neurons, int n_inputs, int type) : type(type) {
 
 }
 
-Layer::Layer(const std::vector<std::vector<double>>& weights_layer, int type) : type(type) {
+Layer::Layer(const std::vector<std::vector<double>>& weights_layer, Layer_Type type) : type(type) {
     if (type < 0 || type > 2)
         throw std::invalid_argument("Invalid type");
 
@@ -37,9 +37,42 @@ double Layer::d_relu(double x) {
     return (x < 0.0) ? 0.0 : 1.0;
 }
 
-double Layer::d_softmax(double x, double eX, double mX) {
-    double s = softmax(x, eX, mX);
-    return s * (1.0 - s);
+double Layer::d_softmax(int i, int j) {
+    if (i == j) {
+        double s = neurons[i].get_a();
+        return s * (1 - s);
+    } else {
+        return - neurons[i].get_a() * neurons[j].get_a();
+    }
+}
+
+double Layer::activate(const std::vector<double>& args, Activation_Type activation_type) {
+    switch (activation_type) {
+        case SOFTMAX:
+            return softmax(args[0], args[1], args[2]);
+        default:
+            throw std::invalid_argument("Unknown activation type");
+    }
+}
+
+double Layer::activate(double x, Activation_Type activation_type) {
+    switch (activation_type) {
+        case RELU:
+            return relu(x);
+        default:
+            throw std::invalid_argument("Unknown activation type");
+    }
+}
+
+double Layer::d_activate(int i, int j, const std::vector<double>& additional_args, Activation_Type activation_type) {
+    switch (activation_type) {
+        case SOFTMAX:
+            return d_softmax(i, j);
+        case RELU:
+            return d_relu(neurons[i].get_z());
+        default:
+            throw std::invalid_argument("Unknown activation type");
+    }
 }
 
 std::vector<double> Layer::weighted_sums(const std::vector<double>& inputs) {
@@ -54,22 +87,48 @@ std::vector<double> Layer::weighted_sums(const std::vector<double>& inputs) {
 }
 
 std::vector<double> Layer::forward(const std::vector<double>& inputs) {
-    double max_sum, eX;
     std::vector<double> sums = weighted_sums(inputs);
     std::vector<double> outputs;
     outputs.reserve(sums.size());
 
     if (type == OUTPUT_LAYER) {
-        max_sum = *std::max_element(sums.begin(), sums.end());
-        eX = 0.0;
+        double max_sum = *std::max_element(sums.begin(), sums.end());
+        double eX = 0.0;
+
         for (double sum : sums)
             eX += std::exp(sum - max_sum);
-        for (double sum : sums)
-            outputs.push_back(softmax(sum, eX, max_sum));
+
+        additional_data = {eX, max_sum};
+
+        for (int i = 0; i < sums.size(); i++) {
+            double sum = sums[i];
+            double a = activate({sum, eX, max_sum}, SOFTMAX);
+            neurons[i].set_a(a);
+            neurons[i].set_da_dz(d_activate(i, i ,{eX, max_sum}, SOFTMAX)); // For back propagation
+            outputs.push_back(a);
+        }
     } else {
-        for (double sum : sums)
-            outputs.push_back(relu(sum));
+        for (int i = 0; i < sums.size(); i++) {
+            double sum = sums[i];
+            double a = activate(sum, RELU);
+
+            neurons[i].set_a(a);
+            neurons[i].set_da_dz(d_activate(i, i, {neurons[i].get_z()}, RELU)); // For back propagation
+            outputs.push_back(a);
+        }
     }
 
     return outputs;
+}
+
+std::vector<Neuron>& Layer::get_neurons() {
+    return neurons;
+}
+
+Layer_Type Layer::get_type() {
+    return type;
+}
+
+std::vector<double>& Layer::get_additional_data() {
+    return additional_data;
 }

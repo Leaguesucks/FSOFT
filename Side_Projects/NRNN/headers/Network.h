@@ -11,6 +11,7 @@
 class Network {
     private:
         std::vector<Layer> layers;
+        std::vector<double> inputs;
 
     public:
         /**
@@ -31,7 +32,7 @@ class Network {
          * @param inputs The inputs to feed to the network
          * @return The probabilities of each output
          */
-        std::vector<double> forward_propagation(std::vector<double> inputs);
+        std::vector<double> forward_propagation(const std::vector<double>& inputs);
 
         /**
          * @brief The loss function used for this network
@@ -47,4 +48,21 @@ class Network {
          * @return The derivative of the loss function
          */
         double d_loss(double y, double y_hat);
+
+        /**
+         * @param L The <L>-th layer
+         * @param J The <J>-th neuron
+         * @param Y The expected outputs
+         * @return The gradient of this neuron's weights to the loss function
+         */
+        std::vector<double> d_loss_d_w(int L, int J, const std::vector<double>& Y);
+
+        /**
+         * @brief Recursively calculate the gradient of the activation of the <J> neuron in the <L> layer
+         * @param L The <L>-th layer
+         * @param J The <J>-th neuron
+         * @param Y The expected outputs of the network
+         * @return The gradient of the activation of this neuron
+         */
+        double d_loss_d_a(int L, int J, const std::vector<double>& Y);
 };
