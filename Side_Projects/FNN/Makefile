@@ -8,7 +8,8 @@ SRC = main.cpp \
       Neuron.cpp \
       Layer.cpp \
       Network.cpp \
-      MNIST.cpp
+      MNIST.cpp \
+	  test.cpp
 
 OBJ = $(SRC:.cpp=.o)
 

@@ -47,10 +47,10 @@ void Neuron::set_a(double value) {
     a = value;
 }
 
-double Neuron::get_da_dz() {
-    return da_dz;
+double Neuron::get_bias() {
+    return bias;
 }
 
-void Neuron::set_da_dz(double value) {
-    da_dz = value;
+void Neuron::set_bias(double value) {
+    bias = value;
 }

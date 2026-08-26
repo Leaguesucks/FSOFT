@@ -7,11 +7,6 @@
 
 #include "Neuron.h"
 
-enum Layer_Type {
-    HIDDEN_LAYER,
-    OUTPUT_LAYER
-};
-
 enum Activation_Type {
     RELU,
     SOFTMAX
@@ -23,24 +18,23 @@ enum Activation_Type {
 class Layer {
     private:
         std::vector<Neuron> neurons;
-        std::vector<double> additional_data; // Holds addtional data for back propagation, such as max_a and sum (exp(a))
-        Layer_Type type;
+        Activation_Type activation_type; // The type of activaton function this layer use
 
     public:
         /**
          * @brief Default constructor
          * @param n_neurons The number of neuron in this layer
          * @param n_inputs The number of inputs = The number of neuron in the previous layer
-         * @param type The type of this layer: HIDDEN_LAYER | OUTPUT_LAYER
+         * @param activation_type The type of activation for this layer
          */
-        Layer(int n_neurons, int n_inputs, Layer_Type type);
+        Layer(int n_neurons, int n_inputs, Activation_Type activation_type);
 
         /**
          * @brief Constructor for when the weights of the neurons is known
          * @param weights_layer The weights to assign to all neuron in this layer
-         * @param type The type of this layer: HIDDEN_LAYER | OUTPUT_LAYER
+         * @param activation_type The type fo activation for this layer
          */
-        Layer(const std::vector<std::vector<double>>& weights_layer, Layer_Type type);
+        Layer(const std::vector<std::vector<double>>& weights_layer, Activation_Type activation_type);
 
         /** 
          * @param n_inputs The number of inputs
@@ -81,10 +75,7 @@ class Layer {
         std::vector<double> forward(const std::vector<double>& inputs);
 
         std::vector<Neuron>& get_neurons();
-
-        Layer_Type get_type();
-
-        std::vector<double>& get_additional_data();
+        Activation_Type get_activation_type();
 
     private:
         /**

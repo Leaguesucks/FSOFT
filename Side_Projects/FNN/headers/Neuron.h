@@ -17,7 +17,7 @@
 class Neuron {
     private:
         std::vector<double> weights;
-        double bias, z, a, da_dz;
+        double bias, z, a;
 
     public:
         /**
@@ -49,6 +49,6 @@ class Neuron {
         double get_a();
         void set_a(double value);
 
-        double get_da_dz();
-        void set_da_dz(double value);
+        double get_bias();
+        void set_bias(double value);
 };
