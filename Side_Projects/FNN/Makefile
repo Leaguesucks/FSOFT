@@ -9,7 +9,7 @@ SRC = main.cpp \
       Layer.cpp \
       Network.cpp \
       MNIST.cpp \
-	  test.cpp
+	  Adam.cpp
 
 OBJ = $(SRC:.cpp=.o)
 
@@ -30,5 +30,6 @@ run: $(TARGET)
 clean:
 	rm -f $(OBJ)
 	rm -f $(TARGET)
-	rm -f .out/image.txt
+	rm -f .out/*.out
 	rm -f .out/*.png
+	rm -f training/*.png

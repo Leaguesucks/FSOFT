@@ -2,6 +2,9 @@
 
 #include <vector>
 #include <stdexcept>
+#include <string>
+#include <fstream>
+#include <cstdint>
 
 #include "Layer.h"
 
@@ -22,7 +25,8 @@ struct Layer_Architecture {
 class Network {
     private:
         std::vector<Layer> layers;
-        std::vector<double> inputs;
+        std::vector<double> X; // The inputs to feed into this network
+        std::vector<double> Y_HAT; // The outputs of this network
         Loss_Type loss_type;
 
     public:
@@ -44,9 +48,8 @@ class Network {
         /**
          * @brief Feed the inputs through the network and return the results
          * @param inputs The inputs to feed to the network
-         * @return The probabilities of each output
          */
-        std::vector<double> forward_propagation(const std::vector<double>& inputs);
+        void forward_propagation(const std::vector<double>& inputs);
 
         /**
          * @brief The loss function used for this network
@@ -66,39 +69,43 @@ class Network {
         double d_loss(double y, double y_hat, Loss_Type type);
 
         /**
-         * @param L The <L>-th layer
-         * @param J The <J>-th neuron
-         * @param Y The expected outputs
-         * @return The gradient of this neuron's weights to the loss function
-         */
-        std::vector<double> d_loss_d_w(int L, int J, const std::vector<double>& Y);
-
-        /**
-         * @brief Recursively calculate the gradient of the activation of the <J> neuron in the <L> layer
-         * @param L The <L>-th layer
-         * @param J The <J>-th neuron
-         * @param Y The expected outputs of the network
-         * @return The gradient of the activation of this neuron
-         */
-        double d_loss_d_a(int L, int J, const std::vector<double>& Y);
-
-        /**
          * @param X The inputs to feed into this network
-         * @param Y The expectedd output
+         * @param Y The expected output
          * @return The total loss
          */
         double total_loss(const std::vector<double>& X, const std::vector<double>& Y);
 
-        /**
-         * @brief Update the weights of a neuron J in layer L using back propagation
-         * @param L The <L>-th layer
-         * @param j The <J>-th layer
-         * @param learning_rate The learning rate to apply: w_new = w_old - lr * grad
-         * @param Y The expected output
-         */
-        void update_weights(int L, int J, double learning_rate, const std::vector<double>& Y);
-
         std::vector<Layer>& get_layers();
+
+        /**
+         * @brief Calculate the gradient of the weights, dL/da and the delta terms for each neuron
+         * @param Y The expected outputs
+         * @note Use this only after foward propagation has been called
+         * @note This back propagation is meant for general case. Should look into sepcial cases or
+         *       parallelism for optimization later
+         */
+        void back_propagation(const std::vector<double>& Y);
+
+        /**
+         * @brief Perform both forward and backward propagation in one cycle
+         * @param X The inputs to feed into this network
+         * @param Y The expected output of this network
+         */
+        void forward_back_propagation(const std::vector<double>& X, const std::vector<double>& Y);
+
+        std::vector<double>& get_Y_HAT();
+
+        /**
+         * @brief Save the current network to a file for next use
+         * @param filename Path to the file to save
+         */
+        void save(const std::string& filename);
+
+        /**
+         * @brief Load an already existed network
+         * @param filename Path to the saved file
+         */
+        void load(const std::string& filename);
 
     private:
         /**

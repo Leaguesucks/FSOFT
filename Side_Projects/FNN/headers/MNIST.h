@@ -5,6 +5,8 @@
 #include <vector>
 #include <cstdint>
 #include <stdexcept>
+#include <cstdlib>
+#include <ctime>
 
 struct MNIST_Image {
     std::vector<double> pixels;

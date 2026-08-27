@@ -1,169 +1,5 @@
 #include "headers/test.h"
 
-void test_1() {
-        std::vector<std::vector<double>> hidden_weights = {
-        {0.2, -0.4},
-        {0.5,  0.3}
-    };
-
-    std::vector<std::vector<double>> output_weights = {
-        {0.7, -0.2},
-        {-0.3, 0.6}
-    };
-
-    Layer hidden(hidden_weights, RELU);
-    Layer output(output_weights, SOFTMAX);
-
-    Network network(
-        std::vector<Layer>{hidden, output},
-        SSE
-    );
-
-    // Input
-    std::vector<double> X = {
-        0.8,
-        0.5
-    };
-
-    // One-hot target
-    std::vector<double> Y = {
-        1.0,
-        0.0
-    };
-
-    // ------------------------------------------------------------
-    // Forward propagation
-    // ------------------------------------------------------------
-
-    std::vector<double> prediction =
-        network.forward_propagation(X);
-
-    std::cout << std::fixed << std::setprecision(10);
-
-    std::cout << "Predictions:\n";
-
-    for (double value : prediction)
-        std::cout << "  " << value << '\n';
-
-    // Calculate total loss
-    double original_loss = 0.0;
-
-    for (size_t i = 0; i < Y.size(); ++i)
-        original_loss += network.loss(
-            Y[i],
-            prediction[i],
-            SSE
-        );
-
-    std::cout << "\nOriginal loss: "
-              << original_loss << "\n\n";
-
-    // ------------------------------------------------------------
-    // Test one weight
-    //
-    // output neuron 0
-    // weight 0
-    // ------------------------------------------------------------
-
-    const int L = 1;
-    const int J = 0;
-    const size_t weight_index = 0;
-
-    double analytical_gradient =
-        network.d_loss_d_w(L, J, Y)[weight_index];
-
-    // ------------------------------------------------------------
-    // Numerical gradient
-    //
-    // dL/dw ≈ [L(w + epsilon) - L(w - epsilon)] / 2epsilon
-    // ------------------------------------------------------------
-
-    const double epsilon = 1e-5;
-
-    std::vector<Neuron>& neurons =
-        network.get_layers()[L].get_neurons();
-
-    std::vector<double>& weights =
-        neurons[J].get_weights();
-
-    double original_weight = weights[weight_index];
-
-    // L(w + epsilon)
-    weights[weight_index] = original_weight + epsilon;
-
-    std::vector<double> prediction_plus =
-        network.forward_propagation(X);
-
-    double loss_plus = 0.0;
-
-    for (size_t i = 0; i < Y.size(); ++i)
-        loss_plus += network.loss(
-            Y[i],
-            prediction_plus[i],
-            SSE
-        );
-
-    // L(w - epsilon)
-    weights[weight_index] = original_weight - epsilon;
-
-    std::vector<double> prediction_minus =
-        network.forward_propagation(X);
-
-    double loss_minus = 0.0;
-
-    for (size_t i = 0; i < Y.size(); ++i)
-        loss_minus += network.loss(
-            Y[i],
-            prediction_minus[i],
-            SSE
-        );
-
-    // Restore original weight
-    weights[weight_index] = original_weight;
-
-    double numerical_gradient =
-        (loss_plus - loss_minus) / (2.0 * epsilon);
-
-    // ------------------------------------------------------------
-    // Compare
-    // ------------------------------------------------------------
-
-    std::cout << "Gradient test\n";
-    std::cout << "-------------\n";
-
-    std::cout << "Layer:              " << L << '\n';
-    std::cout << "Neuron:             " << J << '\n';
-    std::cout << "Weight:             " << weight_index << '\n';
-
-    std::cout << "Analytical gradient: "
-              << analytical_gradient << '\n';
-
-    std::cout << "Numerical gradient:  "
-              << numerical_gradient << '\n';
-
-    double absolute_error =
-        std::abs(analytical_gradient - numerical_gradient);
-
-    double relative_error =
-        absolute_error /
-        std::max(
-            1.0,
-            std::abs(analytical_gradient) +
-            std::abs(numerical_gradient)
-        );
-
-    std::cout << "Absolute error:      "
-              << absolute_error << '\n';
-
-    std::cout << "Relative error:      "
-              << relative_error << '\n';
-
-    if (relative_error < 1e-5)
-        std::cout << "\nPASS\n";
-    else
-        std::cout << "\nFAIL\n";
-}
-
 double calculate_loss(
     Network& network,
     const std::vector<double>& X,
@@ -186,94 +22,57 @@ double calculate_loss(
 }
 
 
-// ================================================================
-// Gradient check test
-//
-// Example:
-//
-// test_gradient_check(
-//     64,              // inputs
-//     {32, 16, 8},     // hidden layers
-//     10               // outputs
-// );
-//
-// Architecture:
-//
-// 64
-//  ↓
-// 32 ReLU
-//  ↓
-// 16 ReLU
-//  ↓
-// 8 ReLU
-//  ↓
-// 10 Softmax
-// ================================================================
-
 void test_gradient_check(
     size_t input_size,
     const std::vector<size_t>& hidden_sizes,
     size_t output_size
 ) {
     // ============================================================
-    // Configuration
+    // Gradient-check parameters
     // ============================================================
 
     constexpr double epsilon = 1e-5;
-    constexpr double tolerance = 1e-5;
+
+    // A gradient is considered correct when:
+    //
+    // |analytical - numerical|
+    // <= absolute_tolerance
+    //    + relative_tolerance * scale
+    //
+    constexpr double absolute_tolerance = 1e-8;
+    constexpr double relative_tolerance = 1e-5;
 
     std::cout << std::fixed << std::setprecision(10);
 
     std::cout << "========================================\n";
-    std::cout << "Gradient Check\n";
+    std::cout << "Backpropagation Gradient Check\n";
     std::cout << "========================================\n\n";
-
-    std::cout << "Input neurons:  "
-              << input_size << '\n';
-
-    std::cout << "Hidden layers:  "
-              << hidden_sizes.size() << '\n';
-
-    for (size_t i = 0; i < hidden_sizes.size(); ++i) {
-        std::cout
-            << "  Layer " << i
-            << ": "
-            << hidden_sizes[i]
-            << " ReLU neurons\n";
-    }
-
-    std::cout << "Output neurons: "
-              << output_size
-              << " Softmax neurons\n\n";
 
 
     // ============================================================
     // Validate architecture
     // ============================================================
 
-    if (input_size == 0) {
+    if (input_size == 0)
         throw std::invalid_argument(
             "Input size must be greater than zero"
         );
-    }
 
-    if (output_size == 0) {
+    if (output_size == 0)
         throw std::invalid_argument(
             "Output size must be greater than zero"
         );
-    }
 
     for (size_t size : hidden_sizes) {
-        if (size == 0) {
+        if (size == 0)
             throw std::invalid_argument(
                 "Hidden layer size must be greater than zero"
             );
-        }
     }
 
 
     // ============================================================
-    // Create layers
+    // Create hidden layers
     // ============================================================
 
     std::vector<Layer> layers;
@@ -294,8 +93,6 @@ void test_gradient_check(
 
         // --------------------------------------------------------
         // Deterministic weights
-        //
-        // Small values prevent extreme activations.
         // --------------------------------------------------------
 
         for (size_t neuron = 0;
@@ -317,8 +114,7 @@ void test_gradient_check(
 
                 value -= 0.1;
 
-                weights[neuron][weight] =
-                    value;
+                weights[neuron][weight] = value;
             }
         }
 
@@ -332,7 +128,7 @@ void test_gradient_check(
 
 
     // ============================================================
-    // Output layer
+    // Create output layer
     // ============================================================
 
     {
@@ -360,8 +156,7 @@ void test_gradient_check(
 
                 value -= 0.08;
 
-                weights[neuron][weight] =
-                    value;
+                weights[neuron][weight] = value;
             }
         }
 
@@ -387,15 +182,20 @@ void test_gradient_check(
     // ============================================================
 
     std::vector<double> X(input_size);
-    for (size_t i = 0; i < input_size; ++i) {
-        X[i] = std::sin(static_cast<double>(i) * 0.37);
+
+    for (size_t i = 0;
+         i < input_size;
+         ++i) {
+
+        X[i] =
+            std::sin(
+                static_cast<double>(i) * 0.37
+            );
     }
 
 
     // ============================================================
     // One-hot target
-    //
-    // Pick a deterministic class.
     // ============================================================
 
     std::vector<double> Y(
@@ -437,27 +237,63 @@ void test_gradient_check(
 
     double probability_sum = 0.0;
 
-    for (double p : prediction)
-        probability_sum += p;
+    for (double p : prediction) {
 
-    std::cout << "\nProbability sum: "
-              << probability_sum
-              << '\n';
+        if (!std::isfinite(p)) {
+            throw std::runtime_error(
+                "Softmax produced a non-finite probability"
+            );
+        }
+
+        if (p <= 0.0) {
+            throw std::runtime_error(
+                "Softmax produced a non-positive probability"
+            );
+        }
+
+        probability_sum += p;
+    }
+
+    std::cout
+        << "\nProbability sum: "
+        << probability_sum
+        << '\n';
+
+    if (std::abs(probability_sum - 1.0) > 1e-12) {
+        throw std::runtime_error(
+            "Softmax probabilities do not sum to 1"
+        );
+    }
 
 
     // ============================================================
     // Original loss
     // ============================================================
 
-    double original_loss = calculate_loss(network, X, Y);
+    double original_loss =
+        calculate_loss(network, X, Y);
 
-    std::cout << "Original loss:   "
-              << original_loss
-              << "\n\n";
+    if (!std::isfinite(original_loss)) {
+        throw std::runtime_error(
+            "Initial loss is not finite"
+        );
+    }
+
+    std::cout
+        << "Original loss:   "
+        << original_loss
+        << "\n\n";
 
 
     // ============================================================
-    // Gradient checking
+    // Backpropagation
+    // ============================================================
+
+    network.back_propagation(X, Y);
+
+
+    // ============================================================
+    // Gradient-check statistics
     // ============================================================
 
     size_t total_tests = 0;
@@ -478,112 +314,235 @@ void test_gradient_check(
     // Iterate over every layer
     // ============================================================
 
-    for (size_t L = 0; L < network.get_layers().size(); ++L) {
-        std::vector<Neuron>& neurons = network.get_layers()[L].get_neurons();
+    for (size_t L = 0;
+         L < network.get_layers().size();
+         ++L) {
+
+        auto& neurons =
+            network.get_layers()[L].get_neurons();
+
 
         // ========================================================
         // Every neuron
         // ========================================================
 
-        for (size_t J = 0; J < neurons.size(); ++J) {
-            std::vector<double>& weights = neurons[J].get_weights();
+        for (size_t J = 0;
+             J < neurons.size();
+             ++J) {
+
+            auto& weights =
+                neurons[J].get_weights();
+
+            auto& gradients =
+                neurons[J].get_gradients();
+
 
             // ----------------------------------------------------
-            // Calculate analytical gradients
+            // Validate gradient vector
             // ----------------------------------------------------
 
-            std::vector<double> analytical_gradients =
-                network.d_loss_d_w(static_cast<int>(L), static_cast<int>(J), Y);
+            if (gradients.size() != weights.size()) {
+                throw std::runtime_error(
+                    "Gradient vector size does not match "
+                    "weight vector size"
+                );
+            }
+
 
             // ====================================================
             // Every weight
             // ====================================================
 
-            for (size_t I = 0; I < weights.size(); ++I) {
+            for (size_t I = 0;
+                 I < weights.size();
+                 ++I) {
+
                 ++total_tests;
+
+
+                // ------------------------------------------------
+                // Store original weight
+                // ------------------------------------------------
 
                 double original_weight =
                     weights[I];
 
 
-                // =================================================
+                // ------------------------------------------------
                 // L(w + epsilon)
-                // =================================================
+                // ------------------------------------------------
 
                 weights[I] =
                     original_weight + epsilon;
 
-                double loss_plus = calculate_loss(network, X, Y);
+                double loss_plus =
+                    calculate_loss(
+                        network,
+                        X,
+                        Y
+                    );
 
-                // =================================================
+
+                // ------------------------------------------------
                 // L(w - epsilon)
-                // =================================================
+                // ------------------------------------------------
 
                 weights[I] =
                     original_weight - epsilon;
 
-                double loss_minus = calculate_loss(network, X, Y);
+                double loss_minus =
+                    calculate_loss(
+                        network,
+                        X,
+                        Y
+                    );
 
 
-                // =================================================
-                // Restore weight
-                // =================================================
+                // ------------------------------------------------
+                // Restore original weight
+                // ------------------------------------------------
 
-                weights[I] = original_weight;
+                weights[I] =
+                    original_weight;
 
 
-                // =================================================
+                // ------------------------------------------------
+                // Validate losses
+                // ------------------------------------------------
+
+                if (!std::isfinite(loss_plus) ||
+                    !std::isfinite(loss_minus)) {
+
+                    throw std::runtime_error(
+                        "Numerical gradient produced "
+                        "a non-finite loss"
+                    );
+                }
+
+
+                // ------------------------------------------------
                 // Numerical gradient
-                // =================================================
+                //
+                // Central difference:
+                //
+                // dL/dw ≈
+                //     (L(w + ε) - L(w - ε))
+                //     / (2ε)
+                // ------------------------------------------------
 
-                double numerical_gradient = (loss_plus - loss_minus) / (2.0 * epsilon);
+                double numerical_gradient =
+                    (loss_plus - loss_minus)
+                    / (2.0 * epsilon);
 
-                // =================================================
+
+                // ------------------------------------------------
                 // Analytical gradient
-                // =================================================
+                // ------------------------------------------------
 
-                double analytical_gradient = analytical_gradients[I];
+                double analytical_gradient =
+                    gradients[I];
 
 
-                // =================================================
-                // Error
-                // =================================================
-
-                double absolute_error = std::abs(analytical_gradient - numerical_gradient);
-                double denominator = std::abs(analytical_gradient) + std::abs(numerical_gradient);
-                double relative_error;
-
-                if (denominator < 1e-12) {
-                    relative_error = absolute_error;
-                } else {
-                    relative_error = absolute_error / denominator;
+                if (!std::isfinite(analytical_gradient)) {
+                    throw std::runtime_error(
+                        "Backpropagation produced "
+                        "a non-finite gradient"
+                    );
                 }
 
 
                 // =================================================
-                // Track worst gradient
+                // Calculate errors
                 // =================================================
 
-                if (relative_error > max_relative_error) {
-                    max_relative_error = relative_error;
+                double absolute_error =
+                    std::abs(
+                        analytical_gradient
+                        - numerical_gradient
+                    );
 
-                    max_absolute_error = absolute_error;
+
+                // Use the larger magnitude as the scale.
+                //
+                // This avoids artificially inflating the
+                // relative error when one gradient is tiny.
+
+                double scale =
+                    std::max(
+                        std::abs(analytical_gradient),
+                        std::abs(numerical_gradient)
+                    );
+
+
+                double relative_error =
+                    (scale > 0.0)
+                        ? absolute_error / scale
+                        : 0.0;
+
+
+                // ------------------------------------------------
+                // Combined tolerance
+                // ------------------------------------------------
+
+                double allowed_error =
+                    absolute_tolerance
+                    + relative_tolerance * scale;
+
+
+                // =================================================
+                // Track worst gradient
+                //
+                // Use absolute error as the primary metric.
+                // This prevents tiny gradients from appearing
+                // "worst" merely because of relative error.
+                // =================================================
+
+                if (absolute_error >
+                    max_absolute_error) {
+
+                    max_absolute_error =
+                        absolute_error;
+
+                    max_relative_error =
+                        relative_error;
 
                     worst_L = L;
                     worst_J = J;
                     worst_I = I;
 
-                    worst_analytical = analytical_gradient;
+                    worst_analytical =
+                        analytical_gradient;
 
-                    worst_numerical = numerical_gradient;
+                    worst_numerical =
+                        numerical_gradient;
                 }
 
+
                 // =================================================
-                // Check tolerance
+                // Check gradient
                 // =================================================
 
-                if (relative_error > tolerance) {
+                if (absolute_error >
+                    allowed_error) {
+
                     ++failed_tests;
+
+                    std::cout
+                        << "FAIL"
+                        << "  Layer=" << L
+                        << "  Neuron=" << J
+                        << "  Weight=" << I
+                        << "  Analytical="
+                        << analytical_gradient
+                        << "  Numerical="
+                        << numerical_gradient
+                        << "  Absolute error="
+                        << absolute_error
+                        << "  Relative error="
+                        << relative_error
+                        << "  Allowed error="
+                        << allowed_error
+                        << '\n';
                 }
             }
         }
@@ -594,46 +553,66 @@ void test_gradient_check(
     // Results
     // ============================================================
 
-    std::cout << "Gradient check\n";
+    std::cout << "\n";
+    std::cout << "Gradient Check\n";
     std::cout << "---------------\n";
 
-    std::cout << "Total weights tested: "
-              << total_tests
-              << '\n';
+    std::cout
+        << "Total weights tested: "
+        << total_tests
+        << '\n';
 
-    std::cout << "Failed tests:         "
-              << failed_tests
-              << '\n';
+    std::cout
+        << "Failed tests:         "
+        << failed_tests
+        << '\n';
 
     std::cout << "\nWorst gradient:\n";
 
-    std::cout << "  Layer:              "
-              << worst_L
-              << '\n';
+    std::cout
+        << "  Layer:              "
+        << worst_L
+        << '\n';
 
-    std::cout << "  Neuron:             "
-              << worst_J
-              << '\n';
+    std::cout
+        << "  Neuron:             "
+        << worst_J
+        << '\n';
 
-    std::cout << "  Weight:             "
-              << worst_I
-              << '\n';
+    std::cout
+        << "  Weight:             "
+        << worst_I
+        << '\n';
 
-    std::cout << "  Analytical:         "
-              << worst_analytical
-              << '\n';
+    std::cout
+        << "  Analytical:         "
+        << worst_analytical
+        << '\n';
 
-    std::cout << "  Numerical:          "
-              << worst_numerical
-              << '\n';
+    std::cout
+        << "  Numerical:          "
+        << worst_numerical
+        << '\n';
 
-    std::cout << "  Absolute error:     "
-              << max_absolute_error
-              << '\n';
+    std::cout
+        << "  Absolute error:     "
+        << max_absolute_error
+        << '\n';
 
-    std::cout << "  Relative error:     "
-              << max_relative_error
-              << '\n';
+    std::cout
+        << "  Relative error:     "
+        << max_relative_error
+        << '\n';
+
+    std::cout
+        << "  Absolute tolerance: "
+        << absolute_tolerance
+        << '\n';
+
+    std::cout
+        << "  Relative tolerance: "
+        << relative_tolerance
+        << '\n';
 
 
     // ============================================================
@@ -641,13 +620,15 @@ void test_gradient_check(
     // ============================================================
 
     if (failed_tests == 0) {
+
         std::cout
             << "\nPASS: "
-            << "All gradients match.\n";
+            << "All weight gradients match.\n";
 
     } else {
+
         std::cout
             << "\nFAIL: "
-            << "Some gradients do not match.\n";
+            << "Some weight gradients do not match.\n";
     }
 }

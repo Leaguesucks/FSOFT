@@ -17,8 +17,6 @@ double calculate_loss(
     const std::vector<double>& Y
 );
 
-void test_1();
-
 void test_gradient_check(
     size_t input_size,
     const std::vector<size_t>& hidden_sizes,

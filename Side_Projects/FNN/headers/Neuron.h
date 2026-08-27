@@ -16,8 +16,13 @@
  */
 class Neuron {
     private:
-        std::vector<double> weights;
+        std::vector<double> weights, gradients;
+        std::vector<double> mts; // The first moment of each weight at time t
+        std::vector<double> vts; // The second moment of each weight at time t
+        double bias_mt, bias_vt; // Moments for this bias
         double bias, z, a;
+        double delta; // See: https://towardsdatascience.com/backpropagation-step-by-step-derivation-99ac8fbdcc28/
+        double dLda; // Derivative of the loss function with respect to the activation of neuron k in layer l
 
     public:
         /**
@@ -39,9 +44,6 @@ class Neuron {
          */
         double weighted_sum(const std::vector<double>& inputs);
 
-        /**
-         * @return The weights of this neuron
-         */
         std::vector<double>& get_weights();
 
         double get_z();
@@ -51,4 +53,20 @@ class Neuron {
 
         double get_bias();
         void set_bias(double value);
+
+        std::vector<double>& get_gradients();
+        std::vector<double>& get_mts();
+        std::vector<double>& get_vts();
+
+        double get_delta();
+        void set_delta(double value);
+
+        double get_dLda();
+        void set_dLda(double value);
+
+        double get_bias_mt();
+        void set_bias_mt(double value);
+
+        double get_bias_vt();
+        void set_bias_vt(double value);
 };

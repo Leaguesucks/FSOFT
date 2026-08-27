@@ -3,10 +3,7 @@
 uint32_t MNIST::read_uint32(std::ifstream& file) {
     uint8_t bytes[4];
 
-    file.read(
-        reinterpret_cast<char*>(bytes),
-        4
-    );
+    file.read(reinterpret_cast<char*>(bytes), 4);
 
     return
         (static_cast<uint32_t>(bytes[0]) << 24) |
@@ -46,29 +43,19 @@ void MNIST::load(const std::string& image_file, const std::string& label_file) {
 
     for (uint32_t i = 0; i < n_images; ++i) {
         MNIST_Image image;
-
         image.pixels.resize(rows * cols);
 
         for (double& pixel : image.pixels) {
             uint8_t value;
 
-            images.read(
-                reinterpret_cast<char*>(&value),
-                1
-            );
-
+            images.read(reinterpret_cast<char*>(&value), 1);
             pixel = static_cast<double>(value) / 255.0;
         }
 
         uint8_t label;
 
-        labels.read(
-            reinterpret_cast<char*>(&label),
-            1
-        );
-
+        labels.read(reinterpret_cast<char*>(&label), 1);
         image.label = label;
-
         data.push_back(std::move(image));
     }
 }
