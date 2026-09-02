@@ -16,12 +16,15 @@ Network::Network(int n_inputs, const std::vector<Layer_Architecture>& architectu
 Network::Network(const std::vector<Layer>& layers, Loss_Type loss_type) 
 : layers(layers), loss_type(loss_type) {}
 
-void Network::forward_propagation(const std::vector<double>& inputs) {
-    Y_HAT = inputs;
-    this->X = inputs;
+void Network::forward_propagation(std::vector<double>& inputs) {
+    auto& y_hats = inputs;
+    Xs = inputs;
 
-    for (Layer& layer : layers)
-        Y_HAT = layer.forward(Y_HAT);
+    for (Layer& layer : layers) {
+        layer.forward(y_hats);
+        y_hats = layer.get_as();
+    }
+    Y_HAT = y_hats;
 }
 
 double Network::loss(double y, double y_hat, Loss_Type type) {
@@ -78,68 +81,82 @@ double Network::d_categorical_cross_entropy(double y, double y_hat) {
     return -y / (y_hat + 1e-9);
 }
 
-double Network::total_loss(const std::vector<double>& X, const std::vector<double>& Y) {
+double Network::total_loss(std::vector<double>& X, const std::vector<double>& Y) {
+    if (X.size() != Y.size())
+        throw std::invalid_argument("Inputs and outputs size must match");
+
     double losses = 0.0;
 
     forward_propagation(X);
     for (size_t i = 0; i < Y.size(); i++)
         losses += loss(Y[i], Y_HAT[i], loss_type);
+    
+    back_propagation(Y);
+    return losses;
+}
 
+double Network::total_loss(const std::vector<double>& Y) {
+    double losses = 0.0;
+
+    for (size_t i = 0; i < Y.size(); i++)
+        losses += loss(Y[i], Y_HAT[i], loss_type);
     return losses;
 }
 
 void Network::back_propagation(const std::vector<double>& Y) {
     for (size_t l = layers.size(); l-- > 0; ) {
         Layer& current_layer = layers[l];
-        Activation_Type atype = current_layer.get_activation_type();
-        auto& current_neurons = current_layer.get_neurons();
+        Activation_Type atype = current_layer.get_activation_type();;
+
+        auto& weights = current_layer.get_weights();
+        auto& grads = current_layer.get_gradients();
+        auto& as = current_layer.get_as();
+        auto& zs = current_layer.get_zs();
+        auto& deltas = current_layer.get_deltas();
+        auto& dldas = current_layer.get_dldas();
+        double n_neurons = current_layer.get_n_neurons();
+        double n_weights = current_layer.get_n_inputs();
+
+        auto& prev_as = (l == 0) ? Xs : layers[l - 1].get_as();
 
         // Calculate dLda for each neuron in this layer
-        for (size_t k = 0; k < current_neurons.size(); k++) {
-            Neuron& neuron = current_neurons[k];
-    
-            if (l == layers.size() - 1)
-                neuron.set_dLda(d_loss(Y[k], neuron.get_a(), loss_type));
-            else {
-                Layer& next_layer = layers[l + 1];
-                auto& next_neurons = next_layer.get_neurons();
+        if (l == layers.size() - 1)
+            for (size_t k = 0; k < n_neurons; k++)
+                dldas[k] = d_loss(Y[k], as[k], loss_type);
+        else {
+            Layer& next_layer = layers[l + 1];
+            auto& next_weights = next_layer.get_weights();
+            auto& next_deltas = next_layer.get_deltas();
+            double next_n_neurons = next_layer.get_n_neurons();
+            double next_n_weights = next_layer.get_n_inputs();
 
-                double sum = 0.0;
-                for (size_t j = 0; j < next_neurons.size(); j++) {
-                    double weight = next_neurons[j].get_weights()[k];
-                    double delta = next_neurons[j].get_delta();
-                    sum += weight * delta;
-                }
-
-                neuron.set_dLda(sum);
-            }
+            std::fill(dldas.begin(), dldas.end(), 0.0);
+            for (size_t j = 0; j < next_n_neurons; j++)
+                for (size_t k = 0; k < n_neurons; k++)
+                    dldas[k] += next_weights[j * next_n_weights + k] * next_deltas[j];
         }
 
         // Calculate delta for each neuron in this layer
-        for (size_t i = 0; i < current_neurons.size(); i++) {
+        for (size_t i = 0; i < n_neurons; i++) {
             double delta = 0.0;
-            for (size_t j = 0; j < current_neurons.size(); j++) {
-                delta += current_neurons[j].get_dLda() * current_layer.d_activate(j, i, {}, atype);
-            } 
-            current_neurons[i].set_delta(delta);
+
+            if (current_layer.is_single_activation())
+                delta = dldas[i] * current_layer.d_activate(i, i, {}, atype);
+            else
+                for (size_t j = 0; j < n_neurons; j++)
+                    delta += dldas[j] * current_layer.d_activate(j, i, {}, atype);
+
+            dldas[i] = delta;
         }
 
         // Calculate the gradient for each neuron in this layer
-        for (size_t i = 0; i < current_neurons.size(); i++) {
-            auto& gradients = current_neurons[i].get_gradients();
-            auto& weights = current_neurons[i].get_weights();
-            gradients.clear();
-            gradients.reserve(weights.size());
-            
-            for (size_t j = 0; j < weights.size(); j++) {
-                double a = (l == 0) ? X[j] : layers[l - 1].get_neurons()[j].get_a();
-                gradients.push_back(current_neurons[i].get_delta() * a);
-            }
-        }
+        for (size_t i = 0; i < n_neurons; i++)
+            for (size_t j = 0; j < n_weights; j++)
+                grads[i * n_weights + j] = deltas[i] * prev_as[j];
     }
 }
 
-void Network::forward_back_propagation(const std::vector<double>& X, const std::vector<double>& Y) {
+void Network::forward_back_propagation(std::vector<double>& X, const std::vector<double>& Y) {
     forward_propagation(X);
     back_propagation(Y);
 }
@@ -155,36 +172,30 @@ void Network::save(const std::string& filename) {
         throw std::runtime_error("Could not open file for writing: " + filename);
 
     constexpr char MAGIC[] = "FNN";
-    constexpr uint32_t VERSION = 1;
 
     file.write(MAGIC, sizeof(MAGIC) - 1);
     file.write(reinterpret_cast<const char*>(&VERSION), sizeof(VERSION));
 
-    uint64_t input_size = X.size();
+    uint64_t input_size = Xs.size();
     file.write(reinterpret_cast<const char*>(&input_size), sizeof(input_size));
 
     uint64_t n_layers = layers.size();
     file.write(reinterpret_cast<const char*>(&n_layers), sizeof(n_layers));
 
     for (Layer& layer : layers) {
-        auto& neurons = layer.get_neurons();
-        uint64_t n_neurons = neurons.size();
+        auto& weights = layer.get_weights();
+        auto& biases = layer.get_biases();
+        uint32_t n_weights = layer.get_n_inputs();
 
+        uint64_t n_neurons = layer.get_n_neurons();
         file.write(reinterpret_cast<const char*>(&n_neurons), sizeof(n_neurons));
 
         uint32_t activation = static_cast<uint32_t>(layer.get_activation_type());
         file.write(reinterpret_cast<const char*>(&activation), sizeof(activation));
 
-        for (Neuron& neuron : neurons) {
-            auto& weights = neuron.get_weights();
-            uint64_t n_weights = weights.size();
-
-            file.write(reinterpret_cast<const char*>(&n_weights), sizeof(n_weights));
-            file.write(reinterpret_cast<const char*>(weights.data()), weights.size() * sizeof(double));
-
-            double bias = neuron.get_bias();
-            file.write(reinterpret_cast<const char*>(&bias), sizeof(bias));
-        }
+        file.write(reinterpret_cast<const char*>(&n_weights), sizeof(n_weights));
+        file.write(reinterpret_cast<const char*>(weights.data()), sizeof(weights) * sizeof(double));
+        file.write(reinterpret_cast<const char*>(biases.data()), sizeof(biases) * sizeof(double));
     }
 
     if (!file)
@@ -206,7 +217,7 @@ void Network::load(const std::string& filename) {
     uint32_t version;
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
 
-    if (version != 1)
+    if (version != VERSION)
         throw std::runtime_error("Unsupproted version");
 
     uint64_t input_size;
@@ -226,6 +237,19 @@ void Network::load(const std::string& filename) {
         file.read(reinterpret_cast<char*>(&activation_value), sizeof(activation_value));
 
         Activation_Type activation = static_cast<Activation_Type>(activation_value);
+
+        uint32_t n_weights;
+        file.read(reinterpret_cast<char*>(&n_weights), sizeof(n_weights));
+
+        std::vector<double> weights;
+        file.read(reinterpret_cast<char*>(weights.data()), n_weights * n_neurons * sizeof(double));
+
+        
+
+
+
+
+
 
         std::vector<std::vector<double>> weights;
         weights.reserve(n_neurons);
@@ -259,5 +283,5 @@ void Network::load(const std::string& filename) {
 
     if (!file)
         throw std::runtime_error("Error occured while reading from saved file");
-    X.resize(input_size);
+    Xs.resize(input_size);
 }

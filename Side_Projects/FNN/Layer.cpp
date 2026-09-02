@@ -1,6 +1,15 @@
 #include "headers/Layer.h"
 
-Layer::Layer(int n_neurons, int n_inputs, Activation_Type activation_type) : activation_type(activation_type) {
+Layer::Layer(int n_neurons, int n_inputs, Activation_Type activation_type, bool random) : 
+activation_type(activation_type), gradients(n_neurons * n_inputs, 0.0),
+mts(n_neurons * n_inputs, 0.0), vts(n_neurons * n_inputs, 0.0),
+bias_mts(n_neurons, 0.0), bias_vts(n_neurons, 0.0), 
+biases(n_neurons, 0.0), as(n_neurons, 0.0), zs(n_neurons, 0.0),
+deltas(n_neurons, 0.0), dldas(n_neurons, 0.0), n_inputs(n_inputs),
+n_neurons(n_neurons) {
+    if (!random)
+        return;
+
     if (n_neurons <= 0)
         throw std::invalid_argument("Each layer must have at least one neuron");
     if (n_inputs <= 0)
@@ -8,28 +17,33 @@ Layer::Layer(int n_neurons, int n_inputs, Activation_Type activation_type) : act
 
     double deviation = normal_Xavier_Deviation(n_inputs, n_neurons);
 
-    neurons.reserve(n_neurons);
-    for (int i = 0; i < n_neurons; i++)
-        neurons.emplace_back(n_inputs, deviation);
+    std::mt19937_64 rng(std::random_device{}());
+    std::normal_distribution<double> dist(0.0, deviation);
+
+    weights.reserve(n_neurons * n_inputs);
+    for (size_t i = 0; i < n_neurons; i++)
+        for (size_t j = 0; j < n_inputs; j++)
+            weights.push_back(dist(rng));
 
 }
 
-Layer::Layer(const std::vector<std::vector<double>>& weights_layer, Activation_Type activation_type) 
-: activation_type(activation_type) {
-    neurons.reserve(weights_layer.size());
+Layer::Layer(const std::vector<std::vector<double>>& weights_layer, Activation_Type activation_type) {
+    if (weights_layer.empty())
+        throw std::invalid_argument("Each layer must at least have one neuron");
+    if (weights_layer[0].empty())
+        throw std::invalid_argument()
 
-    if (!weights_layer.empty()) {
-        size_t n_inputs = weights_layer[0].size();
 
-        for (const auto& weights : weights_layer) {
-            if (weights.size() != n_inputs)
-                throw std::invalid_argument(
-                    "All neurons in a layer must have the same number of weights"
-                );
-            neurons.emplace_back(weights);
-        }
-    } else {
-        throw std::invalid_argument("Each neuron must have at least one weight");
+    weights.reserve(n_neurons * n_inputs);
+
+    for (const auto& weight_layer : weights_layer) {
+        if (weight_layer.size() != n_inputs)
+            throw std::invalid_argument(
+                "All neurons in a layer must have the same number of weights"
+            );
+
+        for (double w : weight_layer)
+            weights.push_back(w);
     }
 }
 
@@ -51,10 +65,10 @@ double Layer::d_relu(double x) {
 
 double Layer::d_softmax(int i, int j) {
     if (i == j) {
-        double s = neurons[i].get_a();
+        double s = as[i];
         return s * (1 - s);
     } else {
-        return - neurons[i].get_a() * neurons[j].get_a();
+        return - as[i] * as[j];
     }
 }
 
@@ -81,73 +95,106 @@ double Layer::d_activate(int i, int j, const std::vector<double>& additional_arg
         case SOFTMAX:
             return d_softmax(i, j);
         case RELU:
-            if (i == j)
-                return d_relu(neurons[i].get_z());
-            else 
-                return 0;
+            return (i == j) ? d_relu(zs[i]) : 0.0;
         default:
             throw std::invalid_argument("Unknown activation type");
     }
 }
 
-std::vector<double> Layer::weighted_sums(const std::vector<double>& inputs) {
-    std::vector<double> sum;
-    sum.reserve(neurons.size());
-    for (Neuron& neuron : neurons) {
-        double ws = neuron.weighted_sum(inputs);
-        sum.push_back(ws);
+void Layer::weighted_sums(const std::vector<double>& inputs) {
+    for (size_t i = 0; i < n_neurons; i++) {
+        double sum = 0.0;
+        
+        for (size_t j = 0; j < n_inputs; j++) {
+            sum += weights[i * n_neurons + j] * inputs[i];
+        }
+        zs[i] = sum;
     }
-
-    return sum;
 }
 
-std::vector<double> Layer::forward(const std::vector<double>& inputs) {
-    std::vector<double> sums = weighted_sums(inputs);
-
-    std::vector<double> outputs;
-    outputs.reserve(sums.size());
+void Layer::forward(const std::vector<double>& inputs) {
+    weighted_sums(inputs);
 
     switch (activation_type) {
-
         case SOFTMAX: {
-            double max_sum = *std::max_element(sums.begin(), sums.end());
+            double max_sum = *std::max_element(zs.begin(), zs.end());
             double eX = 0.0;
 
-            for (double sum : sums)
-                eX += std::exp(sum - max_sum);
+            for (double z : zs)
+                eX += std::exp(z - max_sum);
 
-            for (size_t i = 0; i < sums.size(); ++i) {
-                double a = activate({sums[i], eX, max_sum}, SOFTMAX);
-
-                neurons[i].set_a(a);
-                outputs.push_back(a);
-            }
-
+            for (size_t i = 0; i < n_neurons; ++i)
+                as[i] = activate({zs[i], eX, max_sum}, SOFTMAX);
             break;
         }
 
         case RELU: {
-            for (size_t i = 0; i < sums.size(); ++i) {
-                double a = activate(sums[i], RELU);
-
-                neurons[i].set_a(a);
-                outputs.push_back(a);
-            }
-
+            for (size_t i = 0; i < n_neurons; ++i)
+                as[i] = activate(zs[i], RELU);
             break;
         }
 
         default:
             throw std::invalid_argument("Unknown activation type");
     }
-
-    return outputs;
-}
-
-std::vector<Neuron>& Layer::get_neurons() {
-    return neurons;
 }
 
 Activation_Type Layer::get_activation_type() {
     return activation_type;
+}
+
+bool Layer::is_single_activation() {
+    return (activation_type <= RELU) ? true : false;
+}
+
+std::vector<double>& Layer::get_weights() {
+    return weights;
+}
+
+std::vector<double>& Layer::get_gradients() {
+    return gradients;
+}
+
+std::vector<double>& Layer::get_mts() {
+    return mts;
+}
+
+std::vector<double>& Layer::get_vts() {
+    return vts;
+}
+
+std::vector<double>& Layer::get_bias_mts() {
+    return bias_mts;
+}
+
+std::vector<double>& Layer::get_bias_vts() {
+    return bias_vts;
+}
+
+std::vector<double>& Layer::get_biases() {
+    return biases;
+}
+
+std::vector<double>& Layer::get_as() {
+    return as;
+}
+
+std::vector<double>& Layer::get_zs() {
+    return zs;
+}
+
+std::vector<double>& Layer::get_deltas() {
+    return deltas;
+}
+
+std::vector<double>& Layer::get_dldas() {
+    return dldas;
+}
+
+double Layer::get_n_neurons() {
+    return n_neurons;
+}
+
+double Layer::get_n_inputs() {
+    return n_inputs;
 }

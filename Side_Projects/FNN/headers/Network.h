@@ -25,9 +25,10 @@ struct Layer_Architecture {
 class Network {
     private:
         std::vector<Layer> layers;
-        std::vector<double> X; // The inputs to feed into this network
+        std::vector<double> Xs; // The inputs to feed into this network
         std::vector<double> Y_HAT; // The outputs of this network
         Loss_Type loss_type;
+        static const uint32_t VERSION = 2;
 
     public:
         /**
@@ -49,7 +50,7 @@ class Network {
          * @brief Feed the inputs through the network and return the results
          * @param inputs The inputs to feed to the network
          */
-        void forward_propagation(const std::vector<double>& inputs);
+        void forward_propagation(std::vector<double>& inputs);
 
         /**
          * @brief The loss function used for this network
@@ -72,8 +73,17 @@ class Network {
          * @param X The inputs to feed into this network
          * @param Y The expected output
          * @return The total loss
+         * @note This is a convenient method that automatically call forward and back propagation everytime is called.
+         *       Use total_loss() variation if you want a transparent workflow
          */
-        double total_loss(const std::vector<double>& X, const std::vector<double>& Y);
+        double total_loss(std::vector<double>& X, const std::vector<double>& Y);
+
+        /**
+         * @param Y The expected output
+         * @return The total loss
+         * @note IMPORTANT: Always call forward_propagation before using this function call
+         */
+        double total_loss(const std::vector<double>& Y);
 
         std::vector<Layer>& get_layers();
 
@@ -91,7 +101,7 @@ class Network {
          * @param X The inputs to feed into this network
          * @param Y The expected output of this network
          */
-        void forward_back_propagation(const std::vector<double>& X, const std::vector<double>& Y);
+        void forward_back_propagation(std::vector<double>& X, const std::vector<double>& Y);
 
         std::vector<double>& get_Y_HAT();
 

@@ -4,9 +4,11 @@
 #include <cmath>
 #include <vector>
 #include <stdexcept>
+#include <random>
 
-#include "Neuron.h"
-
+/**
+ * @brief CONVENTION: For elemental-wise activation, value > RELU, otherwise < RELU
+ */
 enum Activation_Type {
     RELU,
     SOFTMAX
@@ -17,8 +19,17 @@ enum Activation_Type {
  */
 class Layer {
     private:
-        std::vector<Neuron> neurons;
         Activation_Type activation_type; // The type of activaton function this layer use
+
+        // Implement for future optimization
+        std::vector<double> weights, gradients; // The weights and gradients of each neuron in this layer
+        std::vector<double> mts, vts; // The moments of each neuron in this layer
+        std::vector<double> bias_mts, bias_vts; // Moments for the biases of each neuron in this layer
+        std::vector<double> biases; // The biases of each neuron in each layer
+        std::vector<double> as, zs; // The activation and output of each neuron in this layer
+        std::vector<double> deltas, dldas; // The delta and dL / da of each neuron in this layer
+        int n_neurons; // The number of neuron in this layer
+        int n_inputs; // The number of inputs in each layer
 
     public:
         /**
@@ -26,8 +37,9 @@ class Layer {
          * @param n_neurons The number of neuron in this layer
          * @param n_inputs The number of inputs = The number of neuron in the previous layer
          * @param activation_type The type of activation for this layer
+         * @param random True to set the weights randomly, false otherwise - to be used by other constructors
          */
-        Layer(int n_neurons, int n_inputs, Activation_Type activation_type);
+        Layer(int n_neurons, int n_inputs, Activation_Type activation_type, bool random);
 
         /**
          * @brief Constructor for when the weights of the neurons is known
@@ -36,12 +48,12 @@ class Layer {
          */
         Layer(const std::vector<std::vector<double>>& weights_layer, Activation_Type activation_type);
 
-        /** 
-         * @param n_inputs The number of inputs
-         * @param n_neurons The number of neuron in this layer
-         * @return The normal Xavier deviation of this neuron 
+        /**
+         * @brief Constructor for when the weights of the neurons is known
+         * @param weights The weights of each neuron in this layer as a flat array
+         * @param activation_type The activation type of this layer
          */
-        double normal_Xavier_Deviation(int n_inputs, int n_neurons);
+        Layer(const std::vector<double>& weights, Activation_Type activation_type);
 
         /**
          * @param args The argunments to pass to the activation function
@@ -69,20 +81,41 @@ class Layer {
         double d_activate(int i, int j, const std::vector<double>& additional_args, Activation_Type activation_type);
 
         /**
-         * @param inputs The inputs to the layer
-         * @return The outputs of this layer as a vector
+         * @return True if the activation is single element only e.g., RELU, False otherwise e.g., SOFTMAX
          */
-        std::vector<double> forward(const std::vector<double>& inputs);
+        bool is_single_activation();
 
-        std::vector<Neuron>& get_neurons();
+        /**
+         * @brief Calculate the outputs of this layer (activations of all neuron in this layer in other words)
+         * @param inputs The inputs to the layer
+         */
+        void forward(const std::vector<double>& inputs);
+
         Activation_Type get_activation_type();
+
+        std::vector<double>& get_weights();
+        std::vector<double>& get_gradients();
+        std::vector<double>& get_mts();
+        std::vector<double>& get_vts();
+
+        std::vector<double>& get_bias_mts();
+        std::vector<double>& get_bias_vts();
+        std::vector<double>& get_biases();
+        std::vector<double>& get_as();
+        std::vector<double>& get_zs();
+        std::vector<double>& get_deltas();
+        std::vector<double>& get_dldas();
+
+        double get_n_neurons();
+        double get_n_inputs();
 
     private:
         /**
+         * @brief Calculated the weighted sum of each neuron in this layer
          * @param inputs The inputs to the layer
-         * @return The weighted sum of this layer
+         * @note The sums are returned to zs
          */
-        std::vector<double> weighted_sums(const std::vector<double>& inputs);
+        void weighted_sums(const std::vector<double>& inputs);
 
         /**
          * @brief Activation function
@@ -114,4 +147,11 @@ class Layer {
          * @return The derivative of the softmax function
          */
         double d_softmax(int i, int j);
+
+        /** 
+         * @param n_inputs The number of inputs
+         * @param n_neurons The number of neuron in this layer
+         * @return The normal Xavier deviation of this neuron 
+         */
+        double normal_Xavier_Deviation(int n_inputs, int n_neurons);
 };
