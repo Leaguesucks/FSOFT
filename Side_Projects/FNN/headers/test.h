@@ -13,8 +13,8 @@
 
 double calculate_loss(
     Network& network,
-    const std::vector<double>& X,
-    const std::vector<double>& Y
+    std::vector<double>& X,
+    std::vector<double>& Y
 );
 
 void test_gradient_check(

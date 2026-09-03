@@ -1,10 +1,9 @@
-import sys
-import os
 import struct
-import math
+import sys
+from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ============================================================
@@ -16,24 +15,60 @@ NETWORK_FILE = "training/mnist_train.bin"
 MNIST_IMAGES = "mnist/t10k-images.idx3-ubyte"
 MNIST_LABELS = "mnist/t10k-labels.idx1-ubyte"
 
-OUTPUT_DIR = ".out"
-
-WORST_LOSS_FILE = "training/worst_loss.png"
-WORST_CONFIDENCE_FILE = "training/worst_confidence.png"
-
 INPUT_SIZE = 784
 OUTPUT_SIZE = 10
-
 NUM_CLASSES = 10
 
+NETWORK_VERSION = 4
+
+OUTPUT_DIRECTORY = "mnist_results"
+
+N_WORST_ERRORS = 20
+N_WORST_CONFIDENT_ERRORS = 20
+
 
 # ============================================================
-# Directories
+# Activation types
 # ============================================================
 
-def ensure_directories():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs("training", exist_ok=True)
+RELU = 0
+SOFTMAX = 1
+
+
+# ============================================================
+# Utility functions
+# ============================================================
+
+def read_exact(f, size):
+    data = f.read(size)
+
+    if len(data) != size:
+        raise EOFError(
+            f"Unexpected end of file: expected {size} bytes, "
+            f"got {len(data)}"
+        )
+
+    return data
+
+
+def read_u32(f):
+    return struct.unpack("<I", read_exact(f, 4))[0]
+
+
+def read_u64(f):
+    return struct.unpack("<Q", read_exact(f, 8))[0]
+
+
+def read_doubles(f, count):
+    if count == 0:
+        return np.empty(0, dtype=np.float64)
+
+    data = read_exact(f, count * 8)
+
+    return np.frombuffer(
+        data,
+        dtype="<f8"
+    ).copy()
 
 
 # ============================================================
@@ -41,276 +76,150 @@ def ensure_directories():
 # ============================================================
 
 def load_mnist_images(filename):
-    print(f"Loading images: {filename}")
-
     with open(filename, "rb") as f:
-        header = f.read(16)
 
-        if len(header) != 16:
-            raise RuntimeError(
-                "Could not read MNIST image header"
-            )
-
-        magic, count, rows, cols = struct.unpack(
-            ">IIII",
-            header
-        )
+        magic = struct.unpack(">I", read_exact(f, 4))[0]
 
         if magic != 2051:
             raise ValueError(
-                f"Invalid MNIST image magic number: {magic}"
+                f"Invalid MNIST image file magic: {magic}"
             )
 
-        raw = f.read()
+        count = struct.unpack(">I", read_exact(f, 4))[0]
+        rows = struct.unpack(">I", read_exact(f, 4))[0]
+        cols = struct.unpack(">I", read_exact(f, 4))[0]
 
-    expected_size = count * rows * cols
+        if rows != 28 or cols != 28:
+            raise ValueError(
+                f"Expected 28x28 images, got {rows}x{cols}"
+            )
 
-    if len(raw) != expected_size:
-        raise ValueError(
-            f"Invalid MNIST image file size. "
-            f"Expected {expected_size} bytes, "
-            f"got {len(raw)}"
+        data = read_exact(
+            f,
+            count * rows * cols
         )
 
-    images = np.frombuffer(
-        raw,
-        dtype=np.uint8
-    ).reshape(
-        count,
-        rows,
-        cols
-    )
+        images = np.frombuffer(
+            data,
+            dtype=np.uint8
+        ).reshape(
+            count,
+            rows,
+            cols
+        )
 
-    return images
+        return images.copy()
 
 
 def load_mnist_labels(filename):
-    print(f"Loading labels: {filename}")
-
     with open(filename, "rb") as f:
-        header = f.read(8)
 
-        if len(header) != 8:
-            raise RuntimeError(
-                "Could not read MNIST label header"
-            )
-
-        magic, count = struct.unpack(
-            ">II",
-            header
-        )
+        magic = struct.unpack(">I", read_exact(f, 4))[0]
 
         if magic != 2049:
             raise ValueError(
-                f"Invalid MNIST label magic number: {magic}"
+                f"Invalid MNIST label file magic: {magic}"
             )
 
-        raw = f.read()
+        count = struct.unpack(">I", read_exact(f, 4))[0]
 
-    if len(raw) != count:
-        raise ValueError(
-            f"Invalid MNIST label file size. "
-            f"Expected {count} bytes, "
-            f"got {len(raw)}"
+        data = read_exact(f, count)
+
+        labels = np.frombuffer(
+            data,
+            dtype=np.uint8
         )
 
-    labels = np.frombuffer(
-        raw,
-        dtype=np.uint8
-    )
-
-    return labels
-
-
-def load_mnist():
-    images = load_mnist_images(
-        MNIST_IMAGES
-    )
-
-    labels = load_mnist_labels(
-        MNIST_LABELS
-    )
-
-    if len(images) != len(labels):
-        raise ValueError(
-            "Number of images and labels do not match"
-        )
-
-    print(
-        f"Loaded {len(images)} test images."
-    )
-
-    return images, labels
+        return labels.copy()
 
 
 # ============================================================
-# Binary reader
+# Network
 # ============================================================
-
-def read_u32(f):
-    data = f.read(4)
-
-    if len(data) != 4:
-        raise EOFError(
-            "Unexpected EOF while reading uint32"
-        )
-
-    return struct.unpack(
-        "<I",
-        data
-    )[0]
-
-
-def read_u64(f):
-    data = f.read(8)
-
-    if len(data) != 8:
-        raise EOFError(
-            "Unexpected EOF while reading uint64"
-        )
-
-    return struct.unpack(
-        "<Q",
-        data
-    )[0]
-
-
-def read_double(f):
-    data = f.read(8)
-
-    if len(data) != 8:
-        raise EOFError(
-            "Unexpected EOF while reading double"
-        )
-
-    return struct.unpack(
-        "<d",
-        data
-    )[0]
-
-
-# ============================================================
-# Network classes
-# ============================================================
-
-class Neuron:
-
-    def __init__(self, weights, bias):
-
-        self.weights = np.asarray(
-            weights,
-            dtype=np.float64
-        )
-
-        self.bias = float(bias)
-
 
 class Layer:
 
-    def __init__(self, neurons, activation):
-
-        self.neurons = neurons
+    def __init__(
+        self,
+        n_neurons,
+        n_inputs,
+        activation,
+        weights,
+        biases,
+        mts,
+        vts,
+        bias_mts,
+        bias_vts
+    ):
+        self.n_neurons = n_neurons
+        self.n_inputs = n_inputs
         self.activation = activation
+
+        self.weights = weights
+        self.biases = biases
+
+        self.mts = mts
+        self.vts = vts
+
+        self.bias_mts = bias_mts
+        self.bias_vts = bias_vts
+
+    def forward(self, inputs):
+
+        W = self.weights.reshape(
+            self.n_neurons,
+            self.n_inputs
+        )
+
+        z = W @ inputs + self.biases
+
+        if self.activation == RELU:
+
+            return np.maximum(
+                0.0,
+                z
+            )
+
+        elif self.activation == SOFTMAX:
+
+            z_max = np.max(z)
+
+            exp_z = np.exp(
+                z - z_max
+            )
+
+            denominator = np.sum(exp_z)
+
+            return exp_z / denominator
+
+        else:
+
+            raise ValueError(
+                f"Unknown activation type: "
+                f"{self.activation}"
+            )
 
 
 class Network:
 
-    RELU = 0
-    SOFTMAX = 1
-
-    def __init__(self, input_size, layers):
-
+    def __init__(
+        self,
+        input_size,
+        loss_type,
+        adam_t,
+        layers
+    ):
         self.input_size = input_size
+        self.loss_type = loss_type
+        self.adam_t = adam_t
         self.layers = layers
 
-    def forward(self, x):
+    def forward(self, inputs):
 
-        x = np.asarray(
-            x,
-            dtype=np.float64
-        )
+        a = inputs
 
-        if x.size != self.input_size:
-            raise ValueError(
-                f"Network expects {self.input_size} "
-                f"inputs, got {x.size}"
-            )
-
-        a = x
-
-        # ----------------------------------------------------
-        # Forward through every layer
-        # ----------------------------------------------------
-
-        for layer_index, layer in enumerate(
-            self.layers
-        ):
-
-            z = np.empty(
-                len(layer.neurons),
-                dtype=np.float64
-            )
-
-            for neuron_index, neuron in enumerate(
-                layer.neurons
-            ):
-
-                z[neuron_index] = (
-                    np.dot(
-                        neuron.weights,
-                        a
-                    )
-                    + neuron.bias
-                )
-
-            # ------------------------------------------------
-            # ReLU
-            # ------------------------------------------------
-
-            if layer.activation == self.RELU:
-
-                a = np.maximum(
-                    0.0,
-                    z
-                )
-
-            # ------------------------------------------------
-            # Softmax
-            # ------------------------------------------------
-
-            elif layer.activation == self.SOFTMAX:
-
-                # Same numerical stabilization normally used
-                # by a C++ implementation:
-                #
-                # exp(z_i - max(z))
-                #
-                # This prevents overflow.
-
-                z_max = np.max(z)
-
-                exp_z = np.exp(
-                    z - z_max
-                )
-
-                denominator = np.sum(
-                    exp_z
-                )
-
-                if denominator == 0.0:
-                    raise FloatingPointError(
-                        "Softmax denominator is zero"
-                    )
-
-                a = exp_z / denominator
-
-            else:
-
-                raise ValueError(
-                    f"Unsupported activation "
-                    f"{layer.activation} "
-                    f"in layer {layer_index}"
-                )
+        for layer in self.layers:
+            a = layer.forward(a)
 
         return a
 
@@ -321,9 +230,7 @@ class Network:
 
 def load_network(filename):
 
-    print(
-        f"Loading network: {filename}"
-    )
+    print(f"Loading network: {filename}")
 
     with open(filename, "rb") as f:
 
@@ -331,7 +238,7 @@ def load_network(filename):
         # Magic
         # ----------------------------------------------------
 
-        magic = f.read(3)
+        magic = read_exact(f, 3)
 
         if magic != b"FNN":
             raise ValueError(
@@ -344,1047 +251,925 @@ def load_network(filename):
 
         version = read_u32(f)
 
-        if version != 1:
+        if version != NETWORK_VERSION:
             raise ValueError(
-                f"Unsupported network version: {version}"
+                f"Unsupported network version: {version}. "
+                f"Expected {NETWORK_VERSION}"
             )
 
         # ----------------------------------------------------
-        # Input size
+        # Network metadata
         # ----------------------------------------------------
 
         input_size = read_u64(f)
-
-        # ----------------------------------------------------
-        # Number of layers
-        # ----------------------------------------------------
-
         n_layers = read_u64(f)
 
-        print(
-            f"Input size: {input_size}"
-        )
+        loss_type = read_u32(f)
+        adam_t = read_u64(f)
 
-        print(
-            f"Number of layers: {n_layers}"
-        )
+        if input_size != INPUT_SIZE:
+            raise ValueError(
+                f"Expected input size {INPUT_SIZE}, "
+                f"got {input_size}"
+            )
+
+        print(f"Version:       {version}")
+        print(f"Input size:    {input_size}")
+        print(f"Layers:        {n_layers}")
+        print(f"Loss type:     {loss_type}")
+        print(f"Adam timestep: {adam_t}")
+
+        # ----------------------------------------------------
+        # Layers
+        # ----------------------------------------------------
 
         layers = []
 
-        # ----------------------------------------------------
-        # Read every layer
-        # ----------------------------------------------------
+        previous_size = input_size
 
         for layer_index in range(n_layers):
 
             n_neurons = read_u64(f)
-
             activation = read_u32(f)
+            n_inputs = read_u32(f)
 
-            neurons = []
-
-            for neuron_index in range(
-                n_neurons
-            ):
-
-                n_weights = read_u64(f)
-
-                weights = np.empty(
-                    n_weights,
-                    dtype=np.float64
+            if n_inputs != previous_size:
+                raise ValueError(
+                    f"Layer {layer_index}: expected "
+                    f"{previous_size} inputs, "
+                    f"got {n_inputs}"
                 )
 
-                for i in range(
-                    n_weights
-                ):
-                    weights[i] = read_double(f)
-
-                bias = read_double(f)
-
-                neurons.append(
-                    Neuron(
-                        weights,
-                        bias
-                    )
+            if activation not in (RELU, SOFTMAX):
+                raise ValueError(
+                    f"Layer {layer_index}: "
+                    f"unknown activation {activation}"
                 )
 
-            layers.append(
-                Layer(
-                    neurons,
-                    activation
-                )
+            weight_count = n_neurons * n_inputs
+
+            weights = read_doubles(
+                f,
+                weight_count
             )
 
-            if activation == Network.RELU:
-                activation_name = "RELU"
+            biases = read_doubles(
+                f,
+                n_neurons
+            )
 
-            elif activation == Network.SOFTMAX:
-                activation_name = "SOFTMAX"
+            mts = read_doubles(
+                f,
+                weight_count
+            )
 
-            else:
-                activation_name = (
-                    f"UNKNOWN({activation})"
-                )
+            vts = read_doubles(
+                f,
+                weight_count
+            )
+
+            bias_mts = read_doubles(
+                f,
+                n_neurons
+            )
+
+            bias_vts = read_doubles(
+                f,
+                n_neurons
+            )
+
+            layer = Layer(
+                n_neurons,
+                n_inputs,
+                activation,
+                weights,
+                biases,
+                mts,
+                vts,
+                bias_mts,
+                bias_vts
+            )
+
+            layers.append(layer)
 
             print(
-                f"  Layer {layer_index}: "
-                f"{n_neurons} neurons, "
-                f"{activation_name}"
+                f"Layer {layer_index}: "
+                f"{n_inputs} -> {n_neurons}"
             )
 
-        print(
-            "Network loaded successfully.\n"
-        )
+            previous_size = n_neurons
 
-        return Network(
-            input_size,
-            layers
-        )
+    print("Network loaded successfully.\n")
 
-
-# ============================================================
-# Loss
-# ============================================================
-
-def categorical_cross_entropy(
-    label,
-    prediction
-):
-    """
-    Equivalent to:
-
-        -log(P(correct_class))
-
-    for a one-hot target.
-    """
-
-    probability = float(
-        prediction[label]
-    )
-
-    # Prevent log(0).
-    probability = max(
-        probability,
-        1e-15
-    )
-
-    return -math.log(
-        probability
+    return Network(
+        input_size,
+        loss_type,
+        adam_t,
+        layers
     )
 
 
 # ============================================================
-# Image saving
+# Prediction
 # ============================================================
 
-def save_image(
-    image,
-    filename
-):
-
-    image = np.asarray(
-        image,
-        dtype=np.uint8
-    )
-
-    Image.fromarray(
-        image,
-        mode="L"
-    ).save(filename)
-
-
-# ============================================================
-# Probability printing
-# ============================================================
-
-def print_probabilities(
-    prediction
-):
-
-    print(
-        "\nNetwork probabilities:"
-    )
-
-    for digit in range(
-        NUM_CLASSES
-    ):
-
-        probability = float(
-            prediction[digit]
-        )
-
-        print(
-            f"  Digit {digit}: "
-            f"{probability:.15e} "
-            f"({probability * 100.0:.12e}%)"
-        )
-
-
-# ============================================================
-# Prediction information
-# ============================================================
-
-def prediction_information(
-    prediction,
-    label
-):
-
-    predicted_label = int(
-        np.argmax(prediction)
-    )
-
-    predicted_probability = float(
-        prediction[predicted_label]
-    )
-
-    correct_probability = float(
-        prediction[label]
-    )
-
-    loss = categorical_cross_entropy(
-        label,
-        prediction
-    )
-
-    return (
-        predicted_label,
-        predicted_probability,
-        correct_probability,
-        loss
-    )
-
-
-# ============================================================
-# Network sanity check
-# ============================================================
-
-def sanity_check(
-    network,
-    images
-):
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "NETWORK SANITY CHECK"
-    )
-
-    print(
-        "========================================"
-    )
-
-    image = images[0]
+def predict(network, image):
 
     x = (
-        image
-        .astype(np.float64)
+        image.astype(np.float64)
         .reshape(-1)
         / 255.0
     )
 
-    prediction = network.forward(x)
+    probabilities = network.forward(x)
 
-    probability_sum = float(
-        np.sum(prediction)
+    predicted = int(
+        np.argmax(probabilities)
     )
 
-    minimum = float(
-        np.min(prediction)
+    confidence = float(
+        probabilities[predicted]
     )
 
-    maximum = float(
-        np.max(prediction)
+    return (
+        probabilities,
+        predicted,
+        confidence
     )
 
-    print(
-        f"Probability sum:   "
-        f"{probability_sum:.15f}"
+
+def cross_entropy(probabilities, label):
+
+    p = max(
+        float(probabilities[label]),
+        1e-12
     )
 
-    print(
-        f"Minimum output:    "
-        f"{minimum:.15e}"
-    )
-
-    print(
-        f"Maximum output:    "
-        f"{maximum:.15e}"
-    )
-
-    if not np.all(
-        np.isfinite(prediction)
-    ):
-        raise FloatingPointError(
-            "Network produced NaN or Inf"
-        )
-
-    if abs(
-        probability_sum - 1.0
-    ) > 1e-10:
-
-        print(
-            "WARNING: Softmax probabilities "
-            "do not sum to 1."
-        )
-
-    else:
-
-        print(
-            "Softmax check: PASS"
-        )
-
-    print()
+    return -np.log(p)
 
 
 # ============================================================
-# MANUAL mode
+# Font
 # ============================================================
 
-def manual_test(
-    network,
-    images,
-    labels
+def get_font(size, bold=False):
+
+    candidates = []
+
+    if bold:
+        candidates += [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        ]
+
+    candidates += [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+
+    for filename in candidates:
+
+        if Path(filename).exists():
+
+            return ImageFont.truetype(
+                filename,
+                size
+            )
+
+    return ImageFont.load_default()
+
+
+# ============================================================
+# Generate result PNG
+# ============================================================
+
+def save_result_png(
+    filename,
+    image,
+    label,
+    predicted,
+    probabilities,
+    loss,
+    confidence
 ):
 
-    print(
-        "========================================"
+    # --------------------------------------------------------
+    # Image dimensions
+    # --------------------------------------------------------
+
+    image_scale = 12
+
+    image_width = 28 * image_scale
+    image_height = 28 * image_scale
+
+    panel_width = 430
+
+    margin = 20
+
+    width = (
+        image_width
+        + panel_width
+        + margin * 3
     )
 
-    print(
-        "MANUAL TEST MODE"
+    height = max(
+        image_height + margin * 2,
+        480
     )
 
-    print(
-        "========================================"
+    # --------------------------------------------------------
+    # Create white canvas
+    # --------------------------------------------------------
+
+    canvas = Image.new(
+        "RGB",
+        (width, height),
+        "white"
     )
 
-    print(
-        f"Images will be saved to:"
+    draw = ImageDraw.Draw(canvas)
+
+    # --------------------------------------------------------
+    # Fonts
+    # --------------------------------------------------------
+
+    font_title = get_font(
+        24,
+        bold=True
     )
 
-    print(
-        f"  {OUTPUT_DIR}/test.png"
+    font_normal = get_font(
+        18
     )
 
-    print()
-
-    print(
-        "Press ENTER to continue."
+    font_small = get_font(
+        15
     )
 
-    print(
-        "Enter q + ENTER to quit."
+    font_bold = get_font(
+        18,
+        bold=True
     )
 
-    print()
+    # --------------------------------------------------------
+    # MNIST image
+    # --------------------------------------------------------
 
-    for index in range(
-        len(images)
-    ):
+    image_rgb = np.stack(
+        [image, image, image],
+        axis=-1
+    )
 
-        image = images[index]
+    image_pil = Image.fromarray(
+        image_rgb,
+        mode="RGB"
+    )
 
-        label = int(
-            labels[index]
-        )
-
-        # ----------------------------------------------------
-        # Convert image to network input
-        # ----------------------------------------------------
-
-        x = (
-            image
-            .astype(np.float64)
-            .reshape(-1)
-            / 255.0
-        )
-
-        # ----------------------------------------------------
-        # Prediction
-        # ----------------------------------------------------
-
-        prediction = network.forward(x)
-
+    image_pil = image_pil.resize(
         (
-            predicted_label,
-            predicted_probability,
-            correct_probability,
-            loss
-        ) = prediction_information(
-            prediction,
-            label
+            image_width,
+            image_height
+        ),
+        Image.Resampling.NEAREST
+    )
+
+    image_x = margin
+    image_y = margin
+
+    canvas.paste(
+        image_pil,
+        (image_x, image_y)
+    )
+
+    # Border
+    if predicted == label:
+        border_color = "green"
+    else:
+        border_color = "red"
+
+    draw.rectangle(
+        [
+            image_x - 3,
+            image_y - 3,
+            image_x + image_width + 2,
+            image_y + image_height + 2
+        ],
+        outline=border_color,
+        width=5
+    )
+
+    # --------------------------------------------------------
+    # Information panel
+    # --------------------------------------------------------
+
+    panel_x = (
+        image_x
+        + image_width
+        + margin * 2
+    )
+
+    y = margin
+
+    status = (
+        "CORRECT"
+        if predicted == label
+        else "WRONG"
+    )
+
+    draw.text(
+        (panel_x, y),
+        status,
+        fill=border_color,
+        font=font_title
+    )
+
+    y += 45
+
+    draw.text(
+        (panel_x, y),
+        f"True label:  {label}",
+        fill="black",
+        font=font_normal
+    )
+
+    y += 30
+
+    draw.text(
+        (panel_x, y),
+        f"Predicted:   {predicted}",
+        fill="black",
+        font=font_normal
+    )
+
+    y += 30
+
+    draw.text(
+        (panel_x, y),
+        f"Confidence:  {confidence:.12e}",
+        fill="black",
+        font=font_small
+    )
+
+    y += 25
+
+    draw.text(
+        (panel_x, y),
+        f"True prob.:  {probabilities[label]:.12e}",
+        fill="black",
+        font=font_small
+    )
+
+    y += 25
+
+    draw.text(
+        (panel_x, y),
+        f"Loss:        {loss:.12f}",
+        fill="black",
+        font=font_small
+    )
+
+    y += 50
+
+    draw.text(
+        (panel_x, y),
+        "Probabilities",
+        fill="black",
+        font=font_bold
+    )
+
+    y += 35
+
+    # --------------------------------------------------------
+    # Probability bars
+    # --------------------------------------------------------
+
+    bar_width = 260
+    bar_height = 22
+    text_width = 35
+
+    for digit in range(NUM_CLASSES):
+
+        probability = float(
+            probabilities[digit]
         )
 
-        # ----------------------------------------------------
-        # Save image
-        # ----------------------------------------------------
-
-        output_file = os.path.join(
-            OUTPUT_DIR,
-            "test.png"
+        # Digit
+        draw.text(
+            (panel_x, y),
+            str(digit),
+            fill="black",
+            font=font_small
         )
 
-        save_image(
-            image,
-            output_file
+        bar_x = (
+            panel_x
+            + text_width
         )
 
-        # ----------------------------------------------------
-        # Print result
-        # ----------------------------------------------------
-
-        print(
-            "========================================"
+        # Background
+        draw.rectangle(
+            [
+                bar_x,
+                y + 2,
+                bar_x + bar_width,
+                y + bar_height
+            ],
+            outline="gray"
         )
 
-        print(
-            f"Image:              "
-            f"{index + 1}/{len(images)}"
+        # Bar
+        filled_width = int(
+            probability * bar_width
         )
 
-        print(
-            f"True label:         "
-            f"{label}"
-        )
+        if filled_width > 0:
 
-        print(
-            f"Predicted label:    "
-            f"{predicted_label}"
-        )
+            if digit == label:
+                color = "green"
 
-        print(
-            f"Prediction confidence: "
-            f"{predicted_probability:.15e}"
-        )
+            elif digit == predicted:
+                color = "blue"
 
-        print(
-            f"Correct-class probability: "
-            f"{correct_probability:.15e}"
-        )
+            else:
+                color = "gray"
 
-        print(
-            f"Cross-entropy loss: "
-            f"{loss:.15f}"
-        )
-
-        print(
-            f"Correct:            "
-            f"{'YES' if predicted_label == label else 'NO'}"
-        )
-
-        print_probabilities(
-            prediction
-        )
-
-        print()
-
-        print(
-            f"Image saved to:"
-        )
-
-        print(
-            f"  {output_file}"
-        )
-
-        # ----------------------------------------------------
-        # Pause
-        # ----------------------------------------------------
-
-        try:
-
-            command = input(
-                "\nPress ENTER for next image "
-                "(q + ENTER to quit): "
+            draw.rectangle(
+                [
+                    bar_x,
+                    y + 2,
+                    bar_x + filled_width,
+                    y + bar_height
+                ],
+                fill=color
             )
 
-            if command.strip().lower() == "q":
+        # Probability
+        draw.text(
+            (
+                bar_x + bar_width + 10,
+                y
+            ),
+            f"{probability:.6e}",
+            fill="black",
+            font=font_small
+        )
 
-                print(
-                    "\nStopping manual test."
-                )
+        y += 28
 
-                break
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
 
-        except KeyboardInterrupt:
-
-            print(
-                "\nStopping manual test."
-            )
-
-            break
+    canvas.save(
+        filename,
+        format="PNG"
+    )
 
 
 # ============================================================
-# SUMMARY mode
+# Manual mode
 # ============================================================
 
-def summary_test(
+def run_manual(
     network,
     images,
     labels
 ):
 
-    print(
-        "========================================"
+    output_dir = Path(
+        OUTPUT_DIRECTORY
     )
 
-    print(
-        "SUMMARY TEST MODE"
-    )
-
-    print(
-        "========================================"
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True
     )
 
     total = len(images)
 
-    # --------------------------------------------------------
-    # Statistics
-    # --------------------------------------------------------
+    index = 0
 
+    print()
+    print("=" * 60)
+    print("MANUAL MODE")
+    print("=" * 60)
+    print()
+    print("Enter : next image")
+    print("s     : next incorrect prediction")
+    print("q     : quit")
+    print()
+    print(
+        f"PNG files will be saved to: "
+        f"{output_dir}/"
+    )
+    print()
+
+    while index < total:
+
+        image = images[index]
+        label = int(labels[index])
+
+        probabilities, predicted, confidence = predict(
+            network,
+            image
+        )
+
+        loss = cross_entropy(
+            probabilities,
+            label
+        )
+
+        filename = (
+            output_dir
+            / f"image_{index:05d}_"
+              f"true_{label}_"
+              f"pred_{predicted}.png"
+        )
+
+        save_result_png(
+            filename,
+            image,
+            label,
+            predicted,
+            probabilities,
+            loss,
+            confidence
+        )
+
+        # ----------------------------------------------------
+        # Terminal information
+        # ----------------------------------------------------
+
+        print()
+        print("=" * 60)
+        print(
+            f"Image:                  "
+            f"{index + 1}/{total}"
+        )
+
+        print(
+            f"True label:             "
+            f"{label}"
+        )
+
+        print(
+            f"Predicted label:        "
+            f"{predicted}"
+        )
+
+        print(
+            f"Correct:                "
+            f"{'YES' if predicted == label else 'NO'}"
+        )
+
+        print(
+            f"Prediction confidence:  "
+            f"{confidence:.12e}"
+        )
+
+        print(
+            f"Correct-class probability:"
+            f" {probabilities[label]:.12e}"
+        )
+
+        print(
+            f"Cross-entropy loss:     "
+            f"{loss:.12f}"
+        )
+
+        print()
+        print("Network probabilities:")
+
+        for digit, probability in enumerate(
+            probabilities
+        ):
+
+            marker = ""
+
+            if digit == predicted:
+                marker += " <-- predicted"
+
+            if digit == label:
+                marker += " <-- true"
+
+            print(
+                f"  {digit}: "
+                f"{probability:.12e}"
+                f"{marker}"
+            )
+
+        print()
+        print(f"Saved: {filename}")
+
+        # ----------------------------------------------------
+        # Wait for command
+        # ----------------------------------------------------
+
+        command = input(
+            "\n[Enter] next | [s] next error | [q] quit: "
+        ).strip().lower()
+
+        if command == "q":
+            break
+
+        elif command == "s":
+
+            index += 1
+
+            while index < total:
+
+                probabilities, predicted, _ = predict(
+                    network,
+                    images[index]
+                )
+
+                label = int(
+                    labels[index]
+                )
+
+                if predicted != label:
+                    break
+
+                index += 1
+
+            continue
+
+        index += 1
+
+
+# ============================================================
+# Summary mode
+# ============================================================
+
+def run_summary(
+    network,
+    images,
+    labels
+):
+
+    total = len(images)
+
+    correct = 0
     total_loss = 0.0
 
-    n_correct = 0
-
-    # --------------------------------------------------------
-    # Confusion matrix
-    #
-    # confusion[actual][predicted]
-    # --------------------------------------------------------
-
     confusion = np.zeros(
-        (
-            NUM_CLASSES,
-            NUM_CLASSES
-        ),
+        (NUM_CLASSES, NUM_CLASSES),
         dtype=np.int64
     )
 
-    # --------------------------------------------------------
-    # Worst loss
-    # --------------------------------------------------------
+    class_correct = np.zeros(
+        NUM_CLASSES,
+        dtype=np.int64
+    )
 
-    worst_loss = -float("inf")
+    class_total = np.zeros(
+        NUM_CLASSES,
+        dtype=np.int64
+    )
 
-    worst_loss_index = -1
+    worst_errors = []
+    confident_errors = []
 
-    worst_loss_prediction = None
+    print("=" * 60)
+    print("MNIST NETWORK SUMMARY")
+    print("=" * 60)
 
-    worst_loss_label = -1
+    for i in range(total):
 
-    # --------------------------------------------------------
-    # Worst incorrect confidence
-    #
-    # This finds the incorrectly classified image for which
-    # the network is most confident in its WRONG prediction.
-    # --------------------------------------------------------
-
-    worst_confidence = -float("inf")
-
-    worst_confidence_index = -1
-
-    worst_confidence_prediction = None
-
-    worst_confidence_label = -1
-
-    # --------------------------------------------------------
-    # Test every image
-    # --------------------------------------------------------
-
-    for index in range(total):
-
-        image = images[index]
-
-        label = int(
-            labels[index]
+        probabilities, predicted, confidence = predict(
+            network,
+            images[i]
         )
 
-        # ----------------------------------------------------
-        # Normalize
-        # ----------------------------------------------------
+        label = int(labels[i])
 
-        x = (
-            image
-            .astype(np.float64)
-            .reshape(-1)
-            / 255.0
+        loss = cross_entropy(
+            probabilities,
+            label
         )
-
-        # ----------------------------------------------------
-        # Forward
-        # ----------------------------------------------------
-
-        prediction = network.forward(x)
-
-        # ----------------------------------------------------
-        # Validate numerical output
-        # ----------------------------------------------------
-
-        if not np.all(
-            np.isfinite(prediction)
-        ):
-
-            raise FloatingPointError(
-                f"Network produced NaN/Inf "
-                f"on image {index}"
-            )
-
-        # ----------------------------------------------------
-        # Prediction
-        # ----------------------------------------------------
-
-        predicted_label = int(
-            np.argmax(prediction)
-        )
-
-        predicted_probability = float(
-            prediction[predicted_label]
-        )
-
-        loss = categorical_cross_entropy(
-            label,
-            prediction
-        )
-
-        # ----------------------------------------------------
-        # Loss
-        # ----------------------------------------------------
 
         total_loss += loss
 
-        # ----------------------------------------------------
-        # Accuracy
-        # ----------------------------------------------------
-
-        if predicted_label == label:
-            n_correct += 1
-
-        # ----------------------------------------------------
-        # Confusion matrix
-        # ----------------------------------------------------
-
         confusion[
             label,
-            predicted_label
+            predicted
         ] += 1
 
-        # ----------------------------------------------------
-        # Worst loss
-        # ----------------------------------------------------
+        class_total[label] += 1
 
-        if loss > worst_loss:
+        if predicted == label:
 
-            worst_loss = loss
-
-            worst_loss_index = index
-
-            worst_loss_prediction = (
-                prediction.copy()
-            )
-
-            worst_loss_label = label
-
-        # ----------------------------------------------------
-        # Worst incorrect confidence
-        # ----------------------------------------------------
-
-        if predicted_label != label:
-
-            if (
-                predicted_probability
-                > worst_confidence
-            ):
-
-                worst_confidence = (
-                    predicted_probability
-                )
-
-                worst_confidence_index = (
-                    index
-                )
-
-                worst_confidence_prediction = (
-                    prediction.copy()
-                )
-
-                worst_confidence_label = (
-                    label
-                )
-
-        # ----------------------------------------------------
-        # Progress
-        # ----------------------------------------------------
-
-        if (
-            (index + 1) % 500 == 0
-            or index + 1 == total
-        ):
-
-            print(
-                f"Tested "
-                f"{index + 1}/{total} images..."
-            )
-
-    # ========================================================
-    # Final statistics
-    # ========================================================
-
-    average_loss = (
-        total_loss / total
-    )
-
-    accuracy = (
-        float(n_correct)
-        / float(total)
-    )
-
-    n_incorrect = (
-        total - n_correct
-    )
-
-    print()
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "FINAL RESULT"
-    )
-
-    print(
-        "========================================"
-    )
-
-    print(
-        f"Total images:      "
-        f"{total}"
-    )
-
-    print(
-        f"Correct:            "
-        f"{n_correct}"
-    )
-
-    print(
-        f"Incorrect:          "
-        f"{n_incorrect}"
-    )
-
-    print(
-        f"Average loss:       "
-        f"{average_loss:.10f}"
-    )
-
-    print(
-        f"Accuracy:           "
-        f"{accuracy * 100.0:.4f}%"
-    )
-
-    # ========================================================
-    # Per-class accuracy
-    # ========================================================
-
-    print()
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "PER-CLASS ACCURACY"
-    )
-
-    print(
-        "========================================"
-    )
-
-    for digit in range(
-        NUM_CLASSES
-    ):
-
-        actual_count = int(
-            np.sum(
-                confusion[digit]
-            )
-        )
-
-        correct_count = int(
-            confusion[
-                digit,
-                digit
-            ]
-        )
-
-        if actual_count > 0:
-
-            class_accuracy = (
-                float(correct_count)
-                / float(actual_count)
-            )
+            correct += 1
+            class_correct[label] += 1
 
         else:
 
-            class_accuracy = 0.0
+            worst_errors.append(
+                (
+                    loss,
+                    i,
+                    label,
+                    predicted,
+                    confidence
+                )
+            )
+
+            confident_errors.append(
+                (
+                    confidence,
+                    i,
+                    label,
+                    predicted,
+                    loss
+                )
+            )
+
+    accuracy = (
+        correct
+        / total
+        * 100.0
+    )
+
+    average_loss = (
+        total_loss
+        / total
+    )
+
+    print()
+    print(f"Total images:      {total}")
+    print(f"Correct:           {correct}")
+    print(f"Incorrect:         {total - correct}")
+    print(
+        f"Average loss:      "
+        f"{average_loss:.12f}"
+    )
+    print(
+        f"Accuracy:          "
+        f"{accuracy:.4f}%"
+    )
+
+    # --------------------------------------------------------
+    # Per-class accuracy
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 60)
+    print("PER-CLASS ACCURACY")
+    print("=" * 60)
+
+    for digit in range(NUM_CLASSES):
+
+        acc = (
+            class_correct[digit]
+            / class_total[digit]
+            * 100.0
+        )
 
         print(
             f"Digit {digit}: "
-            f"{correct_count:4d}/"
-            f"{actual_count:4d} "
-            f"= "
-            f"{class_accuracy * 100.0:7.3f}%"
+            f"{class_correct[digit]:4d}/"
+            f"{class_total[digit]:4d} = "
+            f"{acc:7.3f}%"
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # Confusion matrix
-    # ========================================================
+    # --------------------------------------------------------
 
     print()
+    print("=" * 60)
+    print("CONFUSION MATRIX")
+    print("=" * 60)
 
     print(
-        "========================================"
-    )
-
-    print(
-        "CONFUSION MATRIX"
-    )
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "Actual \\ Predicted"
-    )
-
-    print(
-        "       "
-        + "".join(
-            f"{i:7d}"
-            for i in range(NUM_CLASSES)
+        "      "
+        + " ".join(
+            f"{i:5d}"
+            for i in range(10)
         )
     )
 
-    for actual in range(
-        NUM_CLASSES
+    for actual in range(10):
+
+        print(
+            f"{actual:3d}: "
+            + " ".join(
+                f"{confusion[actual, predicted]:5d}"
+                for predicted in range(10)
+            )
+        )
+
+    # --------------------------------------------------------
+    # Worst errors
+    # --------------------------------------------------------
+
+    worst_errors.sort(
+        reverse=True,
+        key=lambda x: x[0]
+    )
+
+    print()
+    print("=" * 60)
+    print(
+        f"TOP {N_WORST_ERRORS} "
+        "WORST ERRORS"
+    )
+    print("=" * 60)
+
+    for rank, error in enumerate(
+        worst_errors[:N_WORST_ERRORS],
+        start=1
     ):
 
+        loss, index, label, predicted, confidence = error
+
         print(
-            f"{actual:6d}"
-            + "".join(
-                f"{confusion[actual, predicted]:7d}"
-                for predicted in range(
-                    NUM_CLASSES
-                )
-            )
+            f"{rank:2d}. "
+            f"Image {index:5d}: "
+            f"{label} -> {predicted}, "
+            f"confidence={confidence:.12e}, "
+            f"loss={loss:.12f}"
         )
 
-    # ========================================================
-    # Worst loss image
-    # ========================================================
+    # --------------------------------------------------------
+    # Most confident wrong predictions
+    # --------------------------------------------------------
 
-    print()
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "WORST CASE BY CROSS-ENTROPY LOSS"
-    )
-
-    print(
-        "========================================"
-    )
-
-    worst_loss_predicted = int(
-        np.argmax(
-            worst_loss_prediction
-        )
-    )
-
-    worst_loss_confidence = float(
-        worst_loss_prediction[
-            worst_loss_predicted
-        ]
-    )
-
-    worst_loss_correct_probability = float(
-        worst_loss_prediction[
-            worst_loss_label
-        ]
-    )
-
-    print(
-        f"Image index:        "
-        f"{worst_loss_index}"
-    )
-
-    print(
-        f"True label:         "
-        f"{worst_loss_label}"
-    )
-
-    print(
-        f"Predicted label:    "
-        f"{worst_loss_predicted}"
-    )
-
-    print(
-        f"Correct probability:"
-        f" {worst_loss_correct_probability:.15e}"
-    )
-
-    print(
-        f"Prediction confidence:"
-        f" {worst_loss_confidence:.15e}"
-    )
-
-    print(
-        f"Loss:               "
-        f"{worst_loss:.15f}"
-    )
-
-    print(
-        f"Correct:            "
-        f"{'YES' if worst_loss_predicted == worst_loss_label else 'NO'}"
-    )
-
-    print_probabilities(
-        worst_loss_prediction
-    )
-
-    worst_loss_file = (
-        WORST_LOSS_FILE
-    )
-
-    save_image(
-        images[worst_loss_index],
-        worst_loss_file
+    confident_errors.sort(
+        reverse=True,
+        key=lambda x: x[0]
     )
 
     print()
-
+    print("=" * 60)
     print(
-        "Worst-loss image saved to:"
+        f"TOP {N_WORST_CONFIDENT_ERRORS} "
+        "MOST CONFIDENT WRONG PREDICTIONS"
     )
+    print("=" * 60)
 
-    print(
-        f"  {worst_loss_file}"
-    )
+    for rank, error in enumerate(
+        confident_errors[
+            :N_WORST_CONFIDENT_ERRORS
+        ],
+        start=1
+    ):
 
-    # ========================================================
-    # Worst confident incorrect prediction
-    # ========================================================
-
-    if worst_confidence_index >= 0:
-
-        print()
+        confidence, index, label, predicted, loss = error
 
         print(
-            "========================================"
+            f"{rank:2d}. "
+            f"Image {index:5d}: "
+            f"{label} -> {predicted}, "
+            f"confidence={confidence:.12e}, "
+            f"loss={loss:.12f}"
         )
 
-        print(
-            "WORST CONFIDENT INCORRECT PREDICTION"
-        )
+    # --------------------------------------------------------
+    # Most common confusion pairs
+    # --------------------------------------------------------
 
-        print(
-            "========================================"
-        )
+    pairs = []
 
-        worst_confidence_predicted = int(
-            np.argmax(
-                worst_confidence_prediction
-            )
-        )
+    for actual in range(NUM_CLASSES):
 
-        correct_probability = float(
-            worst_confidence_prediction[
-                worst_confidence_label
+        for predicted in range(NUM_CLASSES):
+
+            if actual == predicted:
+                continue
+
+            count = confusion[
+                actual,
+                predicted
             ]
-        )
 
-        print(
-            f"Image index:        "
-            f"{worst_confidence_index}"
-        )
+            if count > 0:
 
-        print(
-            f"True label:         "
-            f"{worst_confidence_label}"
-        )
+                pairs.append(
+                    (
+                        count,
+                        actual,
+                        predicted
+                    )
+                )
 
-        print(
-            f"Predicted label:    "
-            f"{worst_confidence_predicted}"
-        )
-
-        print(
-            f"Wrong prediction probability:"
-            f" {worst_confidence:.15e}"
-        )
-
-        print(
-            f"Correct probability:"
-            f" {correct_probability:.15e}"
-        )
-
-        print(
-            f"Correct:            NO"
-        )
-
-        print_probabilities(
-            worst_confidence_prediction
-        )
-
-        worst_confidence_file = (
-            WORST_CONFIDENCE_FILE
-        )
-
-        save_image(
-            images[worst_confidence_index],
-            worst_confidence_file
-        )
-
-        print()
-
-        print(
-            "Worst-confident-error image saved to:"
-        )
-
-        print(
-            f"  {worst_confidence_file}"
-        )
-
-    else:
-
-        print()
-
-        print(
-            "No incorrectly classified "
-            "images were found."
-        )
-
-    # ========================================================
-    # Summary
-    # ========================================================
+    pairs.sort(
+        reverse=True
+    )
 
     print()
+    print("=" * 60)
+    print("MOST COMMON CONFUSION PAIRS")
+    print("=" * 60)
 
-    print(
-        "========================================"
-    )
+    for count, actual, predicted in pairs[:20]:
 
-    print(
-        "TEST COMPLETE"
-    )
+        print(
+            f"{actual} -> {predicted}: "
+            f"{count} errors"
+        )
 
-    print(
-        "========================================"
-    )
+    print()
 
 
 # ============================================================
@@ -1393,137 +1178,61 @@ def summary_test(
 
 def main():
 
-    # --------------------------------------------------------
-    # Command line
-    # --------------------------------------------------------
+    mode = "MANUAL"
 
-    if len(sys.argv) != 2:
-
-        print(
-            "Usage:"
-        )
-
-        print(
-            f"  python3 {sys.argv[0]} MANUAL"
-        )
-
-        print(
-            f"  python3 {sys.argv[0]} SUMMARY"
-        )
-
-        sys.exit(1)
-
-    mode = sys.argv[1].upper()
+    if len(sys.argv) >= 2:
+        mode = sys.argv[1].upper()
 
     if mode not in (
         "MANUAL",
         "SUMMARY"
     ):
-
         print(
-            "Error: mode must be MANUAL or SUMMARY"
+            "Usage:\n"
+            "  python MNIST_Display.py MANUAL\n"
+            "  python MNIST_Display.py SUMMARY"
         )
 
         sys.exit(1)
 
     # --------------------------------------------------------
-    # Prepare directories
-    # --------------------------------------------------------
-
-    ensure_directories()
-
-    # --------------------------------------------------------
     # Load MNIST
     # --------------------------------------------------------
 
-    print(
-        "========================================"
+    images = load_mnist_images(
+        MNIST_IMAGES
     )
 
-    print(
-        "Loading MNIST test set"
+    labels = load_mnist_labels(
+        MNIST_LABELS
     )
 
-    print(
-        "========================================"
-    )
+    if len(images) != len(labels):
+        raise ValueError(
+            "Number of images and labels "
+            "do not match"
+        )
 
-    images, labels = load_mnist()
+    print(
+        f"Loaded {len(images)} "
+        f"MNIST test images."
+    )
 
     # --------------------------------------------------------
     # Load network
     # --------------------------------------------------------
-
-    print()
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "Loading neural network"
-    )
-
-    print(
-        "========================================"
-    )
 
     network = load_network(
         NETWORK_FILE
     )
 
     # --------------------------------------------------------
-    # Validate architecture
+    # Run
     # --------------------------------------------------------
 
-    if network.input_size != INPUT_SIZE:
+    if mode == "SUMMARY":
 
-        raise ValueError(
-            f"Network input size is "
-            f"{network.input_size}, "
-            f"but MNIST requires "
-            f"{INPUT_SIZE}"
-        )
-
-    if len(network.layers) == 0:
-
-        raise ValueError(
-            "Network contains no layers"
-        )
-
-    last_layer = network.layers[-1]
-
-    if len(last_layer.neurons) != OUTPUT_SIZE:
-
-        raise ValueError(
-            f"Network output size is "
-            f"{len(last_layer.neurons)}, "
-            f"but expected "
-            f"{OUTPUT_SIZE}"
-        )
-
-    if last_layer.activation != Network.SOFTMAX:
-
-        raise ValueError(
-            "Final network layer is not SOFTMAX"
-        )
-
-    # --------------------------------------------------------
-    # Sanity check
-    # --------------------------------------------------------
-
-    sanity_check(
-        network,
-        images
-    )
-
-    # --------------------------------------------------------
-    # Test
-    # --------------------------------------------------------
-
-    if mode == "MANUAL":
-
-        manual_test(
+        run_summary(
             network,
             images,
             labels
@@ -1531,16 +1240,12 @@ def main():
 
     else:
 
-        summary_test(
+        run_manual(
             network,
             images,
             labels
         )
 
-
-# ============================================================
-# Entry point
-# ============================================================
 
 if __name__ == "__main__":
     main()

@@ -26,6 +26,7 @@ class Layer {
         std::vector<double> mts, vts; // The moments of each neuron in this layer
         std::vector<double> bias_mts, bias_vts; // Moments for the biases of each neuron in this layer
         std::vector<double> biases; // The biases of each neuron in each layer
+        std::vector<double> biases_gradients; // The gradients of the biases of each neuron in this layer
         std::vector<double> as, zs; // The activation and output of each neuron in this layer
         std::vector<double> deltas, dldas; // The delta and dL / da of each neuron in this layer
         int n_neurons; // The number of neuron in this layer
@@ -50,10 +51,11 @@ class Layer {
 
         /**
          * @brief Constructor for when the weights of the neurons is known
+         * @param n_neurons The number of neuron in this layer
          * @param weights The weights of each neuron in this layer as a flat array
          * @param activation_type The activation type of this layer
          */
-        Layer(const std::vector<double>& weights, Activation_Type activation_type);
+        Layer(int n_neurons, const std::vector<double>& weights, Activation_Type activation_type);
 
         /**
          * @param args The argunments to pass to the activation function
@@ -74,11 +76,10 @@ class Layer {
         /**
          * @param i The i-th index for neuron's activation
          * @param j The j-th index for neuron's output
-         * @param additional_args Additional argument
          * @param activation_type The type of activation function
          * @return The derivative of the activation of the i-th neuron with respect to the 
          */
-        double d_activate(int i, int j, const std::vector<double>& additional_args, Activation_Type activation_type);
+        double d_activate(int i, int j, Activation_Type activation_type);
 
         /**
          * @return True if the activation is single element only e.g., RELU, False otherwise e.g., SOFTMAX
@@ -101,13 +102,14 @@ class Layer {
         std::vector<double>& get_bias_mts();
         std::vector<double>& get_bias_vts();
         std::vector<double>& get_biases();
+        std::vector<double>& get_biases_gradients();
         std::vector<double>& get_as();
         std::vector<double>& get_zs();
         std::vector<double>& get_deltas();
         std::vector<double>& get_dldas();
 
-        double get_n_neurons();
-        double get_n_inputs();
+        int get_n_neurons();
+        int get_n_inputs();
 
     private:
         /**

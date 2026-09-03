@@ -17,15 +17,25 @@ class Adam {
         double epsilon; // To avoid division by zero
         
         Network& network; // The network to train
-        std::size_t t; // Adam time step
 
     public:
         Adam(Network& network, double a = 0.001, double B1 = 0.9, double B2 = 0.999, double epsilon = 1e-8);
 
         /**
-         * @brief Update the weights in batches
-         * @param X The input to feed to the network
-         * @param Y The expected output
+         * @brief Zeros all gradients to prepare them for a new batch
          */
-        void update_weights(const std::vector<double>& X, const std::vector<double>& Y);
+        void zero_gradients();
+
+        /**
+         * @brief Call forward and back propagation to calculate the gradients and update the weights
+         * @param X The inputs to feed into this network
+         * @param Y The expected output of this network
+         */
+        void accumulate_gradients(const std::vector<double>& X, const std::vector<double>& Y);
+
+        /**
+         * @brief Update the weights
+         * @param batch_size The size of the batch to use for the update
+         */
+        void update_weights(size_t batch_size);
 };

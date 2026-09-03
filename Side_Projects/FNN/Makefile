@@ -5,10 +5,10 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -Wpedantic -Iheaders -O2
 TARGET = bin/main.exe
 
 SRC = main.cpp \
-      Neuron.cpp \
       Layer.cpp \
       Network.cpp \
       MNIST.cpp \
+	  test.cpp \
 	  Adam.cpp
 
 OBJ = $(SRC:.cpp=.o)
@@ -33,3 +33,4 @@ clean:
 	rm -f .out/*.out
 	rm -f .out/*.png
 	rm -f training/*.png
+	rm -f mnist_results/*.png

@@ -4,9 +4,10 @@ Layer::Layer(int n_neurons, int n_inputs, Activation_Type activation_type, bool 
 activation_type(activation_type), gradients(n_neurons * n_inputs, 0.0),
 mts(n_neurons * n_inputs, 0.0), vts(n_neurons * n_inputs, 0.0),
 bias_mts(n_neurons, 0.0), bias_vts(n_neurons, 0.0), 
-biases(n_neurons, 0.0), as(n_neurons, 0.0), zs(n_neurons, 0.0),
-deltas(n_neurons, 0.0), dldas(n_neurons, 0.0), n_inputs(n_inputs),
-n_neurons(n_neurons) {
+biases(n_neurons, 0.0), biases_gradients(n_neurons, 0.0),
+as(n_neurons, 0.0), zs(n_neurons, 0.0),
+deltas(n_neurons, 0.0), dldas(n_neurons, 0.0),
+n_neurons(n_neurons), n_inputs(n_inputs) {
     if (!random)
         return;
 
@@ -21,23 +22,22 @@ n_neurons(n_neurons) {
     std::normal_distribution<double> dist(0.0, deviation);
 
     weights.reserve(n_neurons * n_inputs);
-    for (size_t i = 0; i < n_neurons; i++)
-        for (size_t j = 0; j < n_inputs; j++)
+    for (size_t i = 0; i < static_cast<size_t>(n_neurons); i++)
+        for (size_t j = 0; j < static_cast<size_t>(n_inputs); j++)
             weights.push_back(dist(rng));
 
 }
 
-Layer::Layer(const std::vector<std::vector<double>>& weights_layer, Activation_Type activation_type) {
+Layer::Layer(const std::vector<std::vector<double>>& weights_layer, Activation_Type activation_type) :
+Layer(weights_layer.size(), weights_layer.empty() ? 0 : weights_layer[0].size(), activation_type, false) {
     if (weights_layer.empty())
         throw std::invalid_argument("Each layer must at least have one neuron");
     if (weights_layer[0].empty())
-        throw std::invalid_argument()
-
+        throw std::invalid_argument("Each neuron must have at least one weight");
 
     weights.reserve(n_neurons * n_inputs);
-
     for (const auto& weight_layer : weights_layer) {
-        if (weight_layer.size() != n_inputs)
+        if (weight_layer.size() != static_cast<size_t>(n_inputs))
             throw std::invalid_argument(
                 "All neurons in a layer must have the same number of weights"
             );
@@ -45,6 +45,18 @@ Layer::Layer(const std::vector<std::vector<double>>& weights_layer, Activation_T
         for (double w : weight_layer)
             weights.push_back(w);
     }
+}
+
+Layer::Layer(int n_neurons, const std::vector<double>& weights, Activation_Type activation_type) :
+Layer(n_neurons, weights.size() / n_neurons, activation_type, false) {
+    if (n_neurons <= 0)
+        throw std::invalid_argument("Each layer must have at least one neuron");
+    if (weights.empty())
+        throw std::invalid_argument("Each layer must at least have one neuron with at least one weight");
+    if (weights.size() % n_neurons != 0)
+        throw std::invalid_argument("Each neuron in a layer must have the same number of weights");
+
+    this->weights = weights;
 }
 
 double Layer::normal_Xavier_Deviation(int n_inputs, int n_neurons) {
@@ -60,7 +72,7 @@ double Layer::softmax(double x, double eX, double mX) {
 }
 
 double Layer::d_relu(double x) {
-    return (x < 0.0) ? 0.0 : 1.0;
+    return (x > 0.0) ? 1.0 : 0.0;
 }
 
 double Layer::d_softmax(int i, int j) {
@@ -90,7 +102,7 @@ double Layer::activate(double x, Activation_Type activation_type) {
     }
 }
 
-double Layer::d_activate(int i, int j, const std::vector<double>& additional_args, Activation_Type activation_type) {
+double Layer::d_activate(int i, int j, Activation_Type activation_type) {
     switch (activation_type) {
         case SOFTMAX:
             return d_softmax(i, j);
@@ -102,19 +114,21 @@ double Layer::d_activate(int i, int j, const std::vector<double>& additional_arg
 }
 
 void Layer::weighted_sums(const std::vector<double>& inputs) {
-    for (size_t i = 0; i < n_neurons; i++) {
-        double sum = 0.0;
+    for (size_t i = 0; i < static_cast<size_t>(n_neurons); i++) {
+        double sum = biases[i];
         
-        for (size_t j = 0; j < n_inputs; j++) {
-            sum += weights[i * n_neurons + j] * inputs[i];
+        for (size_t j = 0; j < static_cast<size_t>(n_inputs); j++) {
+            sum += weights[i * n_inputs + j] * inputs[j];
         }
         zs[i] = sum;
     }
 }
 
 void Layer::forward(const std::vector<double>& inputs) {
-    weighted_sums(inputs);
+    if (inputs.size() != static_cast<size_t>(n_inputs))
+        throw std::invalid_argument("Input size does not match the number of inputs for this layer");
 
+    weighted_sums(inputs);
     switch (activation_type) {
         case SOFTMAX: {
             double max_sum = *std::max_element(zs.begin(), zs.end());
@@ -123,13 +137,13 @@ void Layer::forward(const std::vector<double>& inputs) {
             for (double z : zs)
                 eX += std::exp(z - max_sum);
 
-            for (size_t i = 0; i < n_neurons; ++i)
+            for (size_t i = 0; i < static_cast<size_t>(n_neurons); ++i)
                 as[i] = activate({zs[i], eX, max_sum}, SOFTMAX);
             break;
         }
 
         case RELU: {
-            for (size_t i = 0; i < n_neurons; ++i)
+            for (size_t i = 0; i < static_cast<size_t>(n_neurons); ++i)
                 as[i] = activate(zs[i], RELU);
             break;
         }
@@ -175,6 +189,10 @@ std::vector<double>& Layer::get_biases() {
     return biases;
 }
 
+std::vector<double>& Layer::get_biases_gradients() {
+    return biases_gradients;
+}
+
 std::vector<double>& Layer::get_as() {
     return as;
 }
@@ -191,10 +209,10 @@ std::vector<double>& Layer::get_dldas() {
     return dldas;
 }
 
-double Layer::get_n_neurons() {
+int Layer::get_n_neurons() {
     return n_neurons;
 }
 
-double Layer::get_n_inputs() {
+int Layer::get_n_inputs() {
     return n_inputs;
 }

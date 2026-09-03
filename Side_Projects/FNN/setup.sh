@@ -2,9 +2,12 @@
 sudo apt update
 sudo apt install build-essential
 sudo apt install libopencv-dev
+sudo apt install python3-venv
+sudo apt install python3-pip
 
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install matplotlib numpy
+pip install --upgrade matplotlib numpy
+pip install opencv-python
 pip install torch

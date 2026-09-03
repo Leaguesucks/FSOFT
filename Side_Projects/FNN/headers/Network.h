@@ -28,7 +28,9 @@ class Network {
         std::vector<double> Xs; // The inputs to feed into this network
         std::vector<double> Y_HAT; // The outputs of this network
         Loss_Type loss_type;
-        static const uint32_t VERSION = 2;
+        size_t t; // The time step for the Adam optimizer
+        const uint32_t VERSION = 4;
+        bool accumulate_gradients = false; // Set to true if you want to accumulate gradients for multiple batches before updating the weights
 
     public:
         /**
@@ -40,17 +42,24 @@ class Network {
         Network(int n_inputs, const std::vector<Layer_Architecture>& architectures, Loss_Type loss_type);
 
         /**
-         * @brief Use this constructor if there has been a mid-training
+         * @brief Use this constructor if there has been a mid-training and you want experiment
          * @param layers The layer with all the weights initialized
          * @param loss_type The type of loss function this network use
          */
         Network(const std::vector<Layer>& layers, Loss_Type loss_type);
 
         /**
+         * @brief Load a network from a file
+         * @param filename The path to the file to load
+         * @note The file must be in the format of the save() function
+         */
+        Network(const std::string& filename);
+
+        /**
          * @brief Feed the inputs through the network and return the results
          * @param inputs The inputs to feed to the network
          */
-        void forward_propagation(std::vector<double>& inputs);
+        void forward_propagation(const std::vector<double>& inputs);
 
         /**
          * @brief The loss function used for this network
@@ -76,7 +85,7 @@ class Network {
          * @note This is a convenient method that automatically call forward and back propagation everytime is called.
          *       Use total_loss() variation if you want a transparent workflow
          */
-        double total_loss(std::vector<double>& X, const std::vector<double>& Y);
+        double total_loss(const std::vector<double>& X, const std::vector<double>& Y);
 
         /**
          * @param Y The expected output
@@ -101,9 +110,14 @@ class Network {
          * @param X The inputs to feed into this network
          * @param Y The expected output of this network
          */
-        void forward_back_propagation(std::vector<double>& X, const std::vector<double>& Y);
+        void forward_back_propagation(const std::vector<double>& X, const std::vector<double>& Y);
 
         std::vector<double>& get_Y_HAT();
+
+        bool get_accumulate_gradients();
+        void set_accumulate_gradients(bool accumulate);
+
+        size_t& get_time_step();
 
         /**
          * @brief Save the current network to a file for next use
