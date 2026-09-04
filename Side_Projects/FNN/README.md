@@ -95,19 +95,21 @@ $$
 
 ### ReLU
 
+[svg](https://github.com/Leaguesucks/FSOFT/tree/main/Side_Projects/FNN#relu)
+
 Hidden layers currently use ReLU:
 
 $$
-\operatorname{ReLU}(x) = \max(0,x)
+\mathrm{ReLU}(x) = \max(0,x)
 $$
 
 Its derivative is:
 
 $$
-\operatorname{ReLU}'(x) =
+\mathrm{ReLU}'(x) =
 \begin{cases}
-1 & \text{if } x > 0 \\
-0 & \text{if } x \leq 0
+1 & x > 0 \\
+0 & x \leq 0
 \end{cases}
 $$
 
@@ -115,20 +117,22 @@ $$
 
 ### Softmax
 
+[svg](https://github.com/Leaguesucks/FSOFT/tree/main/Side_Projects/FNN#softmax)
+
 The output layer uses numerically stable Softmax:
 
 $$
-\operatorname{softmax}(z_i)
+\mathrm{softmax}(z_i)
 =
 \frac{e^{z_i-z_{\max}}}
 {\sum_j e^{z_j-z_{\max}}}
 $$
 
-where
+where:
 
-$$
+```math
 z_{\max} = \max_j z_j
-$$
+```
 
 Subtracting the maximum logit does not change the resulting probabilities, but prevents unnecessary numerical overflow during exponentiation.
 
@@ -136,17 +140,19 @@ Subtracting the maximum logit does not change the resulting probabilities, but p
 
 ### Categorical Cross-Entropy
 
+[svg](https://github.com/Leaguesucks/FSOFT/tree/main/Side_Projects/FNN#categorical-cross-entropy)
+
 For a one-hot target vector:
 
-$$
+```math
 L = -\sum_i y_i \log(\hat{y}_i)
-$$
+```
 
 Because the target vector is one-hot, this reduces to:
 
-$$
+```math
 L = -\log(\hat{y}_{\mathrm{correct}})
-$$
+```
 
 The derivative with respect to the Softmax output is:
 
@@ -158,7 +164,7 @@ $$
 
 The current implementation supports the general Softmax Jacobian during backpropagation.
 
-For Softmax combined with categorical cross-entropy, the derivative can be simplified to the well-known expression:
+For Softmax combined with categorical cross-entropy, the derivative can be simplified to:
 
 $$
 \frac{\partial L}{\partial z_i}
@@ -172,6 +178,8 @@ This avoids explicitly constructing or multiplying by the Softmax Jacobian and t
 
 ## Backpropagation
 
+[svg](https://github.com/Leaguesucks/FSOFT/tree/main/Side_Projects/FNN#backpropagation)
+
 The network computes gradients using the chain rule.
 
 For each layer, the gradient with respect to a weight is:
@@ -184,8 +192,8 @@ $$
 
 where:
 
-* $\delta_i$ is the error signal for neuron $i$
-* $a_j$ is the activation from the previous layer
+* `δ_i` is the error signal for neuron `i`
+* `a_j` is the activation from the previous layer
 
 The bias gradient is:
 
@@ -200,6 +208,8 @@ Gradients are accumulated across a mini-batch before the optimizer updates the p
 ---
 
 ## Adam Optimizer
+
+[svg](https://github.com/Leaguesucks/FSOFT/tree/main/Side_Projects/FNN#adam-optimizer)
 
 Training uses the Adam optimization algorithm.
 
@@ -226,13 +236,15 @@ Bias correction is then applied:
 $$
 \hat{m}_t
 =
-\frac{m_t}{1-\beta_1^t}
+\frac{m_t}
+{1-\beta_1^t}
 $$
 
 $$
 \hat{v}_t
 =
-\frac{v_t}{1-\beta_2^t}
+\frac{v_t}
+{1-\beta_2^t}
 $$
 
 The parameter is then updated using:
