@@ -313,7 +313,7 @@ Worst gradient:
 PASS: All weight gradients match.
 ```
 
-This provides strong evidence that the implemented weight gradients are mathematically correct.\
+This provides strong evidence that the implemented weight gradients are mathematically correct.
 
 ---
 
