@@ -1,5 +1,5 @@
 # Neural Network From Scratch in C++
-***JUST AS GOD INTENDED**
+**JUST AS GOD INTENDED**
 
 A feed-forward neural network implemented **from scratch in C++**, trained on the **MNIST handwritten digit dataset**.
 
@@ -98,16 +98,16 @@ $$
 Hidden layers currently use ReLU:
 
 $$
-\mathrm{ReLU}(x) = \max(0,x)
+\operatorname{ReLU}(x) = \max(0,x)
 $$
 
 Its derivative is:
 
 $$
-\mathrm{ReLU}'(x) =
+\operatorname{ReLU}'(x) =
 \begin{cases}
-1 & x > 0 \\
-0 & x \leq 0
+1 & \text{if } x > 0 \\
+0 & \text{if } x \leq 0
 \end{cases}
 $$
 
@@ -118,13 +118,19 @@ $$
 The output layer uses numerically stable Softmax:
 
 $$
-\mathrm{softmax}(z_i)
+\operatorname{softmax}(z_i)
 =
 \frac{e^{z_i-z_{\max}}}
 {\sum_j e^{z_j-z_{\max}}}
 $$
 
-Subtracting the maximum logit prevents unnecessary overflow during exponentiation.
+where
+
+$$
+z_{\max} = \max_j z_j
+$$
+
+Subtracting the maximum logit does not change the resulting probabilities, but prevents unnecessary numerical overflow during exponentiation.
 
 ---
 
@@ -133,32 +139,34 @@ Subtracting the maximum logit prevents unnecessary overflow during exponentiatio
 For a one-hot target vector:
 
 $$
-L = -\sum_i y_i\log(\hat y_i)
+L = -\sum_i y_i \log(\hat{y}_i)
 $$
 
-For the correct class, this reduces to:
+Because the target vector is one-hot, this reduces to:
 
 $$
-L=-\log(\hat y_{\mathrm{correct}})
+L = -\log(\hat{y}_{\mathrm{correct}})
 $$
 
 The derivative with respect to the Softmax output is:
 
 $$
-\frac{\partial L}{\partial \hat y_i}
+\frac{\partial L}{\partial \hat{y}_i}
 =
--\frac{y_i}{\hat y_i}
+-\frac{y_i}{\hat{y}_i}
 $$
 
-The implementation currently supports the general Softmax Jacobian during backpropagation. A future optimization is to use the well-known combined Softmax + Cross-Entropy derivative:
+The current implementation supports the general Softmax Jacobian during backpropagation.
+
+For Softmax combined with categorical cross-entropy, the derivative can be simplified to the well-known expression:
 
 $$
 \frac{\partial L}{\partial z_i}
 =
-\hat y_i-y_i
+\hat{y}_i-y_i
 $$
 
-This reduces the computational cost of the output-layer derivative substantially.
+This avoids explicitly constructing or multiplying by the Softmax Jacobian and therefore substantially reduces the computational cost of the output-layer derivative.
 
 ---
 
@@ -166,7 +174,7 @@ This reduces the computational cost of the output-layer derivative substantially
 
 The network computes gradients using the chain rule.
 
-For each layer, the gradient with respect to its weights is:
+For each layer, the gradient with respect to a weight is:
 
 $$
 \frac{\partial L}{\partial w_{ij}}
@@ -176,8 +184,8 @@ $$
 
 where:
 
-* \(\delta_i\) is the error signal for neuron \(i\)
-* \(a_j\) is the activation from the previous layer
+* $\delta_i$ is the error signal for neuron $i$
+* $a_j$ is the activation from the previous layer
 
 The bias gradient is:
 
@@ -195,35 +203,48 @@ Gradients are accumulated across a mini-batch before the optimizer updates the p
 
 Training uses the Adam optimization algorithm.
 
-For each parameter:
+For each parameter, the first and second moments are updated as:
 
 $$
-m_t = \beta_1m_{t-1}+(1-\beta_1)g_t
+m_t
+=
+\beta_1 m_{t-1}
++
+(1-\beta_1)g_t
 $$
 
 $$
-v_t = \beta_2v_{t-1}+(1-\beta_2)g_t^2
+v_t
+=
+\beta_2 v_{t-1}
++
+(1-\beta_2)g_t^2
 $$
 
 Bias correction is then applied:
 
 $$
-\hat m_t = \frac{m_t}{1-\beta_1^t}
+\hat{m}_t
+=
+\frac{m_t}{1-\beta_1^t}
 $$
 
 $$
-\hat v_t = \frac{v_t}{1-\beta_2^t}
+\hat{v}_t
+=
+\frac{v_t}{1-\beta_2^t}
 $$
 
-and the parameter is updated using:
+The parameter is then updated using:
 
 $$
-\theta_t =
+\theta_t
+=
 \theta_{t-1}
 -
 \alpha
-\frac{\hat m_t}
-{\sqrt{\hat v_t}+\epsilon}
+\frac{\hat{m}_t}
+{\sqrt{\hat{v}_t}+\epsilon}
 $$
 
 Default parameters:
@@ -250,6 +271,7 @@ For each batch:
 4. Accumulate gradients
 5. Average gradients over the batch
 6. Perform one Adam update
+```
 
 The Adam timestep is incremented **once per mini-batch**, rather than once per individual training sample.
 
@@ -259,7 +281,7 @@ The Adam timestep is incremented **once per mini-batch**, rather than once per i
 
 One of the most important parts of the project is numerical gradient checking.
 
-The analytical gradient produced by backpropagation is compared against a numerical approximation:
+The analytical gradient produced by backpropagation is compared against a numerical approximation using the central difference method:
 
 $$
 \frac{\partial L}{\partial w}
@@ -271,7 +293,7 @@ L(w+\epsilon)-L(w-\epsilon)
 }
 $$
 
-This was used to verify the implementation of backpropagation and the flattened weight representation.
+This was used to verify both the backpropagation implementation and the flattened weight representation.
 
 A full gradient check produced:
 
@@ -280,18 +302,18 @@ Total weights tested: 242304
 Failed tests:         0
 
 Worst gradient:
-  Layer:       3
-  Neuron:      5
-  Weight:      55
-  Analytical: -0.0838815663
-  Numerical:  -0.0838815671
-  Absolute error: 0.0000000009
-  Relative error: 0.0000000103
+  Layer:              3
+  Neuron:             5
+  Weight:             55
+  Analytical:        -0.0838815663
+  Numerical:         -0.0838815671
+  Absolute error:     0.0000000009
+  Relative error:     0.0000000103
 
 PASS: All weight gradients match.
 ```
 
-This provided strong evidence that the implemented weight gradients were mathematically correct.
+This provides strong evidence that the implemented weight gradients are mathematically correct.
 
 ---
 
