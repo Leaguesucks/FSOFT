@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:flutter_markdown_plus_latex/flutter_markdown_plus_latex.dart';
+import 'package:markdown/markdown.dart' as md;
 
 import 'code_block.dart';
 
@@ -22,23 +24,29 @@ class MessageBubble extends StatelessWidget {
       alignment: isUser
           ? Alignment.centerRight
           : Alignment.centerLeft,
+
       child: Container(
         constraints: BoxConstraints(
           maxWidth: MediaQuery.of(context).size.width * 0.80,
         ),
+
         margin: const EdgeInsets.only(
           bottom: 12,
         ),
+
         padding: const EdgeInsets.symmetric(
           horizontal: 16,
           vertical: 12,
         ),
+
         decoration: BoxDecoration(
           color: isUser
               ? colorScheme.primary
               : colorScheme.surfaceContainerHighest,
+
           borderRadius: BorderRadius.circular(18),
         ),
+
         child: SelectionArea(
           child: isUser
               ? Text(
@@ -49,12 +57,29 @@ class MessageBubble extends StatelessWidget {
                     color: colorScheme.onPrimary,
                   ),
                 )
+
               : MarkdownBody(
                   data: text,
 
                   builders: {
                     'pre': CodeBlockBuilder(),
+
+                    'latex': LatexElementBuilder(
+                      textStyle: TextStyle(
+                        fontSize: 16,
+                        color: colorScheme.onSurface,
+                      ),
+                    ),
                   },
+
+                  extensionSet: md.ExtensionSet(
+                    [
+                      LatexBlockSyntax(),
+                    ],
+                    [
+                      LatexInlineSyntax(),
+                    ],
+                  ),
 
                   styleSheet: MarkdownStyleSheet(
                     p: TextStyle(

@@ -9,6 +9,7 @@ class QueryType(str, Enum):
     RUBBISH = "RUBBISH"
     LACK_CONTEXT = "LACK CONTEXT"
     CODE = "CODE"
+    GREETING = "GREETING"
 
 class QueryRoute(BaseModel):
     query_type: QueryType = Field(description="The type of query")

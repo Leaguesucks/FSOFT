@@ -127,6 +127,432 @@ class RAG:
         20. The response should contain ONLY Markdown.
     """
 
+    math_rules = """
+        MATHEMATICAL FORMATTING RULES
+
+        The response will be rendered using Markdown with LaTeX support.
+
+        MATHEMATICS MUST FOLLOW THESE RULES EXACTLY.
+
+        1. INLINE MATHEMATICS
+
+        Use exactly one dollar sign on each side of inline mathematical expressions:
+
+        $ ... $
+
+        Example:
+
+        The area of a circle is $A = \\pi r^2$.
+
+        The variable $x_i$ represents the input.
+
+        The probability is $P(y \\mid x)$.
+
+        Do not use plain text for mathematical expressions when LaTeX formatting is appropriate.
+
+        NEVER use \\( ... \\) for inline mathematics.
+
+        NEVER use \\[ ... \\] for inline mathematics.
+
+        2. DISPLAY MATHEMATICS
+
+        Use exactly two dollar signs on each side of a display equation:
+
+        $$
+        ...
+        $$
+
+        Example:
+
+        $$
+        E = mc^2
+        $$
+
+        Another example:
+
+        $$
+        \\pi \\approx 3.14159265359
+        $$
+
+        Display equations MUST be placed on their own lines.
+
+        NEVER use square-bracket notation to delimit mathematics.
+
+        NEVER use [ or \\] as mathematical delimiters.
+
+        NEVER use \\[ or \\] as mathematical delimiters.
+
+        NEVER replace \\(...\\) with any other display delimiter.
+
+        3. MULTI-LINE EQUATIONS
+
+        Use standard LaTeX environments inside \\(...\\).
+
+        Example:
+
+        $$
+        \\begin{{aligned}}
+        y &= mx + b \\\\
+        x &= \\frac{{-b \\pm \\sqrt{{b^2 - 4ac}}}}{{2a}}
+        \\end{{aligned}}
+        $$
+
+        4. FRACTIONS
+
+        Use the LaTeX \\frac command.
+
+        Example:
+
+        $$
+        \\frac{{a}}{{b}}
+        $$
+
+        Inline:
+
+        The ratio is $\\frac{{a}}{{b}}$.
+
+        Do not use plain-text fractions such as a/b when mathematical formatting is appropriate.
+
+        5. SUBSCRIPTS AND SUPERSCRIPTS
+
+        Use LaTeX syntax inside math delimiters.
+
+        Examples:
+
+        $x_i$
+
+        $x^2$
+
+        $x_i^2$
+
+        $y_{{i+1}}$
+
+        Do not output raw mathematical notation such as x_i or x^2 outside a math delimiter.
+
+        6. GREEK LETTERS
+
+        Use LaTeX commands for Greek letters.
+
+        Examples:
+
+        $\\alpha$
+
+        $\\beta$
+
+        $\\theta$
+
+        $\\pi$
+
+        $\\sigma$
+
+        $\\lambda$
+
+        Do not unnecessarily replace LaTeX Greek-letter commands with Unicode symbols.
+
+        7. MATHEMATICAL OPERATORS AND SYMBOLS
+
+        Use standard LaTeX commands.
+
+        Examples:
+
+        $\\sum$
+
+        $\\int$
+
+        $\\infty$
+
+        $\\leq$
+
+        $\\geq$
+
+        $\\neq$
+
+        $\\approx$
+
+        $\\pm$
+
+        Example:
+
+        $$
+        \\sum_{{i=1}}^{{n}} x_i
+        $$
+
+        8. CALCULUS
+
+        Use standard LaTeX notation for derivatives, partial derivatives, integrals, and limits.
+
+        Examples:
+
+        $$
+        \\frac{{dy}}{{dx}}
+        $$
+
+        $$
+        \\frac{{\\partial L}}{{\\partial w}}
+        $$
+
+        $$
+        \\int_a^b f(x)\\,dx
+        $$
+
+        $$
+        \\lim_{{x \\to 0}} \\frac{{\\sin x}}{{x}} = 1
+        $$
+
+        9. MATRICES
+
+        Use standard LaTeX matrix environments.
+
+        Example:
+
+        $$
+        \\begin{{bmatrix}}
+        1 & 2 \\\\
+        3 & 4
+        \\end{{bmatrix}}
+        $$
+
+        10. VECTORS
+
+        Use LaTeX notation for mathematical vectors.
+
+        Examples:
+
+        The input vector is $\\mathbf{{x}}$.
+
+        The weight vector is $\\mathbf{{w}}$.
+
+        A neural network layer can be written as:
+
+        $$
+        \\mathbf{{y}} = \\mathbf{{W}}\\mathbf{{x}} + \\mathbf{{b}}
+        $$
+
+        11. MATHEMATICAL FUNCTIONS
+
+        Use standard LaTeX commands for mathematical functions.
+
+        Examples:
+
+        $\\sin(x)$
+
+        $\\cos(x)$
+
+        $\\log(x)$
+
+        $\\ln(x)$
+
+        $\\exp(x)$
+
+        $\\max(x)$
+
+        $\\min(x)$
+
+        Example:
+
+        $$
+        f(x) = \\frac{{1}}{{1 + e^{{-x}}}}
+        $$
+
+        12. MARKDOWN AND LATEX
+
+        Markdown and LaTeX may be used together.
+
+        Use Markdown for:
+
+        * headings
+        * bullet points
+        * numbered lists
+        * bold text
+        * italic text
+        * code blocks
+
+        Use LaTeX for mathematical notation.
+
+        Example:
+
+        **Cross-Entropy Loss**
+
+        The loss function is:
+
+        $$
+        L = -\\sum_{{i=1}}^{{n}} y_i \\log(\\hat{{y}}_i)
+        $$
+
+        where $y_i$ is the true label and $\\hat{{y}}_i$ is the predicted probability.
+
+        13. MARKDOWN MUST NOT APPEAR INSIDE LATEX
+
+        Do not place Markdown formatting inside mathematical expressions.
+
+        Do not put bold, italic, headings, bullet points, or Markdown code formatting inside $ ... $ or \\(...\\).
+
+        Correct:
+
+        **Loss function**
+
+        $$
+        L = x^2
+        $$
+
+        14. PROGRAMMING CODE
+
+        Programming code must remain inside Markdown code fences.
+
+        Example:
+
+        ```python
+        loss = -sum(y[i] * math.log(y_hat[i]) for i in range(n))
+        ```
+
+        Do not convert programming code into LaTeX.
+
+        Mathematical explanations of the code may use LaTeX.
+
+        Example:
+
+        The loss is:
+
+        $$
+        L = -\\sum_i y_i \\log(\\hat{{y}}_i)
+        $$
+
+        15. NO RAW LATEX
+
+        Every mathematical LaTeX expression MUST be enclosed inside a math delimiter.
+
+        Inline mathematics MUST use:
+
+        $ ... $
+
+        Display mathematics MUST use:
+
+        $$
+        ...
+        $$
+
+        Never output raw LaTeX commands as ordinary text.
+
+        For example, a derivative must be written as:
+
+        $\\frac{{dy}}{{dx}}$
+
+        not as raw LaTeX outside a math delimiter.
+
+        16. STRICT DELIMITER RULE
+
+        There are ONLY TWO valid mathematical delimiter styles:
+
+        INLINE:
+        $ ... $
+
+        DISPLAY:
+
+        $$
+        ...
+        $$
+
+        Do not use any other mathematical delimiter style.
+
+        NEVER use parentheses-based LaTeX delimiters.
+
+        NEVER use bracket-based LaTeX delimiters.
+
+        NEVER use square brackets to surround mathematical expressions.
+
+        NEVER use dollar signs mixed with other delimiter styles.
+
+        17. DO NOT ALTER MATHEMATICAL DELIMITERS
+
+        When generating an equation, preserve the dollar-sign delimiters exactly.
+
+        Correct structure:
+
+        $$
+        mathematical expression
+        $$
+
+        Do not replace the dollar signs with parentheses, brackets, or any other characters.
+
+        18. SIMPLE AND COMPATIBLE LATEX
+
+        Prefer common LaTeX commands that are widely supported by Markdown LaTeX renderers.
+
+        Preferred commands include:
+
+        $$$frac{{}}{{}}
+
+        \\sqrt{{}}
+
+        \\sum
+
+        \\int
+
+        \\partial
+
+        \\mathbf{{}}
+
+        \\hat{{}}
+
+        \\bar{{}}
+
+        \\alpha
+
+        \\beta
+
+        \\theta
+
+        \\pi
+
+        \\infty
+
+        \\leq
+
+        \\geq
+
+        \\neq
+
+        \\approx
+
+        \\pm
+
+        Avoid custom LaTeX macros and obscure commands unless absolutely necessary.
+
+        19. DELIMITER COMPLETENESS
+
+        Every opening $ must have a matching closing $.
+
+        Every display $$ must have a matching closing $$.
+
+        Never leave a mathematical expression unclosed.
+
+        Do not mix inline and display delimiters.
+
+        20. FINAL AND MOST IMPORTANT RULE
+
+        When generating mathematical content:
+
+        USE $ ... $ FOR INLINE MATHEMATICS.
+
+        USE $$ ... $$ FOR DISPLAY MATHEMATICS.
+
+        DO NOT use any other mathematical delimiters.
+
+        DO NOT use square brackets around mathematical expressions.
+
+        DO NOT use parentheses-based LaTeX delimiters.
+
+        DO NOT output raw LaTeX outside math delimiters.
+
+        DO NOT replace mathematical LaTeX with plain text when formatting is appropriate.
+
+        Keep Markdown formatting outside mathematical expressions.
+
+        Keep programming code inside Markdown code fences.
+
+        Always produce valid, renderer-compatible Markdown and LaTeX.
+    """
+
     non_fpt_search_instruction = """
         IMPORTANT:
 
@@ -243,7 +669,6 @@ class RAG:
         - "Who was Ho Chi Minh?"
         - "Tell me a joke."
         - "What is the capital of Japan?"
-        - Greetings or chit-chats
 
         RUBBISH:
         The user's input is meaningless, nonsensical, or garbage.
@@ -255,6 +680,18 @@ class RAG:
         LACK CONTEXT:
         False unless it is a greeting. Otherwise true if:
         The query is too short or ambiguous to determine the user's intent.
+
+        GREETING:
+        Self-explantory. e.g.,
+        
+        "Hello"
+        "Hello, how are you today"
+        "Hi there"
+        "Who are you"
+        "What'up"
+        "Sup"
+        "Yo"
+        etc.
 
         Examples:
         - "Policies"
@@ -411,5 +848,28 @@ class RAG:
 
         Only make claims that are supported by the retrieved
         documents.
+
+        Cite the source in IEEE style.
+    """
+
+    fpt_not_found_instruction = """
+        The user question is FPT related, but none could be found in the database. The following documents were retrieved from web search.
+        Acknowledge this fact to the user FIRST and warn them that the answer you are giving them may be unreliable and encourage them to
+        fact-check the sources.
+
+        THIS MUST BE DONE BEFORE GIVING THE ANSWER.
+
+        Remember to only make claims based on retrieved documents.
+
+        If no document is found from web-search as well, acknowledge that you do not have information for this query.
+
+        DO NOT INVENT INFORMATION.
+
+        Cite the source in IEEE style.
+    """
+
+    greeting_instruction = """
+        This is a greeting. Introduce yourself and ask what 
+        they would like to get helped with.
     """
 

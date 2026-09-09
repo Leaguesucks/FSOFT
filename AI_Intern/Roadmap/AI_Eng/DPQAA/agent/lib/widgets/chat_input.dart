@@ -17,10 +17,7 @@ class ChatInput extends StatelessWidget {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(
-          12,
-          8,
-          12,
-          12,
+          12, 8, 12, 12,
         ),
 
         child: Row(

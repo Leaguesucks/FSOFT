@@ -14,11 +14,4 @@ python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 
 BACKEND_PID=$!
 
-sleep 2
-
-echo "Starting Flutter..."
-
-cd "$FLUTTER_DIR"
-flutter run -d chrome
-
 kill $BACKEND_PID

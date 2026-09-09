@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException
+import json
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -38,11 +40,12 @@ class API:
         def generate():
             for chunk in self.chatBot.answer_stream(
                 query=item.text,
-                session_id="user_123"
+                session_id="user_123",
+                min_score=0.4
             ):
-                yield chunk
+                yield json.dumps(chunk) + "\n"
 
         return StreamingResponse(
             generate(),
-            media_type="text/plain"
+            media_type="application/x-ndjson"
         )

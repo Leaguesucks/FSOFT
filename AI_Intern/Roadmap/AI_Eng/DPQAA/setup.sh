@@ -14,7 +14,4 @@ pip install langchain langchain-core langchain-community langchain-openai
 pip install dotenv 
 pip install llama-cloud qdrant-client
 pip install httpx tavily-python
-
-cd agent
-flutter pub add http
-cd ..
+pip install bm25s, PyStemmer

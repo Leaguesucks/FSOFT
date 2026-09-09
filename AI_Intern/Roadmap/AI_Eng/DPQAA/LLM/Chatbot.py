@@ -16,6 +16,7 @@ from Tools.WebSearch import WebSearch
 class Chatbot:
     '''Responsible for genereating a RAG pipeline'''
     MAX_WEB_CONTEXT_CHARS = 15000
+    EXECUTION_SERVICE_IP = "http://127.0.0.1:8000/execute"
 
     def __init__(self, db: Storage, llm: ChatModel):
         self.db = db
@@ -36,8 +37,11 @@ class Chatbot:
 
             {RAG.rules}
 
-            Stylish your answers using HTML follwing these rules:
+            Stylish your answers using Markdown following these rules:
             {RAG.markdown_rules}
+
+            Stylish the Math expressions following these rules:
+            {RAG.math_rules}
             """
         ),
 
@@ -97,15 +101,11 @@ class Chatbot:
 
         return self.query_resolver.invoke(prompt)
 
-    def retrieve(self, query: str, limit: int=5) -> list[ScoredPoint]:
-        '''Search the vector database for the query'''
-        return self.db.search(
+    def prepare_fpt_query(self, query: str, limit: int=5, min_score: float=0.50) -> str:
+        results = self.db.search_hybrid(
             query=query,
             limit=limit
         )
-
-    def prepare_query(self, query: str, limit: int, min_score: float) -> str:
-        results = self.retrieve(query=query, limit=limit)
         relevant_results = [result for result in results if result.score >= min_score]
         return self.build_context(results=relevant_results)
 
@@ -118,37 +118,53 @@ class Chatbot:
         """
         return self.router.invoke(prompt)
 
-    def build_context(self, results: list[ScoredPoint], max_chars: int=20000) -> str:
+    def build_context(self, results: list[ScoredPoint], max_chars_per_chunk: int=10000) -> str:
         '''Build full context based on the retrieved answer'''
-
-        # if not results:
-        #     return RAG.non_fpt_prompt
-
         context_parts = []
-        current_size = 0
+        root_index, sub_index = 0, 0
+        groups = self.db.group_by_root(results=results)
 
-        for i, result in enumerate(results, start=1):
-            payload = result.payload
+        for root_id, chunks in groups.items():
+            root = self.db.get_chunk(chunk_id=root_id)
+            root_payload = root.payload
             source = f"""
-                --- SOURCE {i} ---
-                Document: {payload["document_name"]}
-                Section: {payload["title"]}
-                Page(s): {payload["pages"]}
+                FULL CONTEXT {root_index}
+                Document: {root_payload["document_name"]}
+                Section: {root_payload["title"]}
+                Page(s): {root_payload["pages"]}
 
-                {payload["content"]}
+                {root_payload["full_content"]}
             """
 
-            if current_size + len(source) > max_chars:
-                break
+            root_index += 1
+            sub_index = 0
+            current_size = len(source)
+            for chunk in chunks:
+                payload = chunk.payload
+                sub =  f"""
+                    SUB-CONTEXT {sub_index}
+                    Document: {payload["document_name"]}
+                    Section: {payload["title"]}
+                    Page(s): {payload["pages"]}
+
+                    {payload["content"]}\n
+                """
+                if current_size + len(sub) > max_chars_per_chunk:
+                    break
+
+                current_size += len(sub)
+                source += sub
+                sub_index += 1
 
             context_parts.append(source)
-            current_size += len(source)
+
+        print("\n".join(context_parts))
 
         return "\n".join(context_parts)
 
     def execute_python(self, code: str):
         response = httpx.post(
-            "http://127.0.0.1:8000/execute",
+            self.EXECUTION_SERVICE_IP,
             json={
                 "language": Language.PYTHON.value,
                 "code": code
@@ -171,63 +187,131 @@ class Chatbot:
 
         return f"Say here is the answer to the query: {execution["stdout"]}\n User Query:\n {query}"
 
-    # def answer(self, query: str, limit: int=5, min_score=0.50, session_id="user_123") -> str:
-    #     '''Answer to the query using RAG pipeline'''
-    #     context = self.prepare_query(query=query, limit=limit, min_score=min_score)
+    def build_fpt_instruction(self, retrieved_context: str, resolved_query: str) -> tuple[str, str]:
+        '''Helper function to build context and instruction for FPT related queries'''
+        if retrieved_context:
+            return (RAG.fpt_related_instruction, retrieved_context)
 
-    #     response = self.conversation.invoke(
-    #         {
-    #             "query": query,
-    #             "context": context,
-    #         },
-    #         config={
-    #             "configurable": {
-    #                 "session_id": session_id
-    #             }
-    #         }
-    #     )
-    #     return response.content
+        web_docs = self.web_search.search(
+            query=resolved_query,
+            max_results=5,
+            search_depth="basic"
+        )
+
+        return (RAG.fpt_not_found_instruction, web_docs)
+
+    def build_doc_context(self, resolved_query: str) -> str:
+        retrieved_context = self.web_search.search(
+                        query=resolved_query,
+                        max_results=5,
+                        search_depth="basic"
+                    )
+        
+        if len(retrieved_context) > self.MAX_WEB_CONTEXT_CHARS: # Hard-code chunking, improve later
+            retrieved_context = (retrieved_context[:self.MAX_WEB_CONTEXT_CHARS]
+                                    + "\n[Web search results truncated]")
+
+        return retrieved_context
 
     def answer_stream(self, query: str, limit: int=5, min_score: float=0.50, session_id:str="user_123"):
         '''Stream the answer token-by-token'''
+        yield {
+            "type": "status",
+            "stage": "resolve",
+            "message": "Resolving query..."
+        }
+
         resolved = self.resolve_query(query=query, session_id=session_id)
         resolved_query = resolved.query
         previous_context = resolved.context
+
+        yield {
+            "type": "status",
+            "stage": "route",
+            "message": "Routing query..."
+        }
 
         route = self.classify_query(query=resolved_query)
         route_type = route.query_type
 
         if route_type == QueryType.FPT:
-            route_instruction = RAG.fpt_related_instruction
-            retrieved_context = self.prepare_query(query=resolved_query, limit=limit, min_score=min_score)
-        elif route_type == QueryType.DOCUMENT:
-            route_instruction = RAG.non_fpt_search_instruction
-            retrieved_context = self.web_search.search(
-                query=resolved_query,
-                max_results=5,
-                search_depth="basic"
-            )
+            yield {
+                "type": "status",
+                "stage": "document_search",
+                "message": "Searching database..."
+            }
 
-            if len(retrieved_context) > self.MAX_WEB_CONTEXT_CHARS: # Hard-code chunking, improve later
-                retrieved_context = (retrieved_context[:self.MAX_WEB_CONTEXT_CHARS]
-                                     + "\n[Web search results truncated]")
+            retrieved_context = self.prepare_fpt_query(query=resolved_query, limit=limit, min_score=min_score)
+
+            if retrieved_context:
+                route_instruction, retrieved_context = self.build_fpt_instruction(retrieved_context=retrieved_context, 
+                                                                              resolved_query=resolved_query)
+            else:
+                yield {
+                    "type": "status",
+                    "stage": "web_search",
+                    "message": "Searching the web..."
+                }
+            
+        elif route_type == QueryType.DOCUMENT:
+            yield {
+                "type": "status",
+                "stage": "web_search",
+                "message": "Searching the web..."
+            }
+
+            route_instruction = RAG.non_fpt_search_instruction
+            retrieved_context = self.build_doc_context(resolved_query=resolved_query)      
+
         elif route_type == QueryType.COMPUTE:
+            yield {
+                "type": "status",
+                "stage": "compute",
+                "message": "Calculating..."
+            }
+
             route_instruction = "Answer the user's computational question using the provided computed result"
             retrieved_context = self.write_code_and_compute(query=resolved_query)
+
         elif route_type == QueryType.CODE:
+            yield {
+                "type": "status",
+                "stage": "code",
+                "message": "Generating code..."
+            }
+
             route_instruction = RAG.code_instruction
             retrieved_context = ""
+
         elif route_type == QueryType.RUBBISH:
             route_instruction = RAG.rubbish_instruction
             retrieved_context = ""
+
         elif route_type == QueryType.LACK_CONTEXT:
             route_instruction = RAG.lack_context_instruction
             retrieved_context = ""
+
         elif route_type == QueryType.GENERAL:
             route_instruction = RAG.casual_instruction
             retrieved_context = ""
+
+        elif route_type == QueryType.GREETING:
+            route_instruction = RAG.greeting_instruction
+            retrieved_context = ""
+        
         else:
-            return "I do not understand this query"
+            yield {
+                "type": "content",
+                "content": "I do not understand this query"
+            }
+
+            return
+
+        yield {
+            "type": "status",
+            "stage": "prepare",
+            "message": "Preparing response..."
+        }
 
         context = f"""
             ROUTING INSTRUCTION:
@@ -246,6 +330,12 @@ class Chatbot:
         # print(context, route_type) # Debug
         # print(retrieved_context)
 
+        yield {
+            "type": "status",
+            "stage": "generate",
+            "message": "Generating response..."
+        }
+
         for chunk in self.conversation.stream(
             {
                 "query": query,
@@ -258,5 +348,8 @@ class Chatbot:
             }
         ):
             if chunk.content:
-                yield chunk.content
+                yield {
+                    "type": "content",
+                    "content": chunk.content
+                }
 

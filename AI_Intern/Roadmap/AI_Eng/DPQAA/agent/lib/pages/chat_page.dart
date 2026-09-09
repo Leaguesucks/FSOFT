@@ -30,6 +30,8 @@ class _ChatPageState extends State<ChatPage> {
 
   bool _isThinking = false;
 
+  String _thinkingStatus = "Thinking...";
+
   Future<void> _sendMessage() async {
     final text = _textEditingController.text.trim();
 
@@ -44,9 +46,11 @@ class _ChatPageState extends State<ChatPage> {
       });
 
       _isThinking = true;
+      _thinkingStatus = "Resolving query...";
     });
 
     _textEditingController.clear();
+
     _scrollToBottom();
 
     try {
@@ -54,10 +58,28 @@ class _ChatPageState extends State<ChatPage> {
 
       await _chatService.sendMessage(
         text,
-        (chunk) {
+
+        onStatus: (status) {
+          if (!mounted) {
+            return;
+          }
+
+          setState(() {
+            _thinkingStatus = status;
+          });
+
+          _scrollToBottom();
+        },
+
+        onChunk: (chunk) {
+          if (!mounted) {
+            return;
+          }
+
           setState(() {
             if (!receivedFirstChunk) {
               receivedFirstChunk = true;
+
               _isThinking = false;
 
               _messages.add({
@@ -73,10 +95,18 @@ class _ChatPageState extends State<ChatPage> {
         },
       );
 
+      if (!mounted) {
+        return;
+      }
+
       setState(() {
         _isThinking = false;
       });
     } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
       setState(() {
         _isThinking = false;
 
@@ -151,16 +181,21 @@ class _ChatPageState extends State<ChatPage> {
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
+
               padding: const EdgeInsets.symmetric(
                 vertical: 10,
                 horizontal: 16,
               ),
+
               itemCount:
                   _messages.length + (_isThinking ? 1 : 0),
+
               itemBuilder: (context, index) {
                 if (_isThinking &&
                     index == _messages.length) {
-                  return const ThinkingBubble();
+                  return ThinkingBubble(
+                    message: _thinkingStatus,
+                  );
                 }
 
                 final message = _messages[index];
