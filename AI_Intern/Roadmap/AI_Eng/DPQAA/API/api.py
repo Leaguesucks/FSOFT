@@ -40,8 +40,7 @@ class API:
         def generate():
             for chunk in self.chatBot.answer_stream(
                 query=item.text,
-                session_id="user_123",
-                min_score=0.4
+                session_id="user_123"
             ):
                 yield json.dumps(chunk) + "\n"
 

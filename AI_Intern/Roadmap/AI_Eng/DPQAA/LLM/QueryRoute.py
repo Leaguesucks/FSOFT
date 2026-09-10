@@ -10,6 +10,7 @@ class QueryType(str, Enum):
     LACK_CONTEXT = "LACK CONTEXT"
     CODE = "CODE"
     GREETING = "GREETING"
+    HARMFUL = "HARMFUL"
 
 class QueryRoute(BaseModel):
     query_type: QueryType = Field(description="The type of query")

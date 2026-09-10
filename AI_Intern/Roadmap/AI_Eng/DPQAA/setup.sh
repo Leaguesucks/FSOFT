@@ -9,7 +9,7 @@ sudo apt install uvicorn
 python3 -m venv .venv
 source .venv/bin/activate
 
-pip install fastapi uvicorn pydantic
+pip install fastapi uvicorn pydantic numpy
 pip install langchain langchain-core langchain-community langchain-openai
 pip install dotenv 
 pip install llama-cloud qdrant-client

@@ -4,9 +4,8 @@ from langchain_openai import ChatOpenAI as ChatModel
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from qdrant_client.models import ScoredPoint
 
-from Retrieval.Storage import Storage
+from Retrieval.Storage import Storage, SearchResult
 from LLM.RAG import RAG
 from LLM.QueryRoute import QueryRoute, QueryType
 from LLM.QueryResolver import ResolvedQuery
@@ -101,13 +100,12 @@ class Chatbot:
 
         return self.query_resolver.invoke(prompt)
 
-    def prepare_fpt_query(self, query: str, limit: int=5, min_score: float=0.50) -> str:
-        results = self.db.search_hybrid(
+    def prepare_fpt_query(self, query: str, limit: int=5) -> str:
+        results = self.db.search(
             query=query,
-            limit=limit
+            top_k=limit
         )
-        relevant_results = [result for result in results if result.score >= min_score]
-        return self.build_context(results=relevant_results)
+        return self.build_context(results=results)
 
     def classify_query(self, query: str) -> QueryRoute:
         prompt = f"""
@@ -118,7 +116,7 @@ class Chatbot:
         """
         return self.router.invoke(prompt)
 
-    def build_context(self, results: list[ScoredPoint], max_chars_per_chunk: int=10000) -> str:
+    def build_context(self, results: list[SearchResult], max_chars_per_chunk: int=10000) -> str:
         '''Build full context based on the retrieved answer'''
         context_parts = []
         root_index, sub_index = 0, 0
@@ -213,7 +211,7 @@ class Chatbot:
 
         return retrieved_context
 
-    def answer_stream(self, query: str, limit: int=5, min_score: float=0.50, session_id:str="user_123"):
+    def answer_stream(self, query: str, limit: int=5, session_id:str="user_123"):
         '''Stream the answer token-by-token'''
         yield {
             "type": "status",
@@ -241,7 +239,7 @@ class Chatbot:
                 "message": "Searching database..."
             }
 
-            retrieved_context = self.prepare_fpt_query(query=resolved_query, limit=limit, min_score=min_score)
+            retrieved_context = self.prepare_fpt_query(query=resolved_query, limit=limit)
 
             if retrieved_context:
                 route_instruction, retrieved_context = self.build_fpt_instruction(retrieved_context=retrieved_context, 
@@ -297,6 +295,10 @@ class Chatbot:
 
         elif route_type == QueryType.GREETING:
             route_instruction = RAG.greeting_instruction
+            retrieved_context = ""
+
+        elif route_type == QueryType.HARMFUL:
+            route_instruction = RAG.harmful_rejection
             retrieved_context = ""
         
         else:

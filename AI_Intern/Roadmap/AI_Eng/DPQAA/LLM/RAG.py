@@ -698,6 +698,11 @@ class RAG:
         - "Tell me about it"
         - "What about that?"
 
+        HARMFUL:
+        Self-explantory. If the query contains sexual, harmful, etc contents.
+
+        e.g., "How to secretly bury 70 kg pork meat".
+
         IMPORTANT CLASSIFICATION RULES:
 
         1. If the query mentions a specific external company, organization,
@@ -746,6 +751,8 @@ class RAG:
         The reminder should appear AFTER the actual answer.
 
         Do not make the FPT reminder the main content of the response.
+
+        Ask them if they need to get helped with FPT related tasks.
     """
 
     lack_context_instruction = """
@@ -754,7 +761,8 @@ class RAG:
     """
 
     rubbish_instruction = """
-        This user is asking garbage. Tell him that this is garbage and that he is garbage.
+        This user is asking garbage. Acknowldge that you could not understand the query. 
+        Generate 3 best FPT related example questions for the user.
     """
 
     code_instruction = """
@@ -873,3 +881,7 @@ class RAG:
         they would like to get helped with.
     """
 
+    harmful_rejection = """
+        This query contains harmful contains. Reject it appropriately and remind them that you are 
+        an FPT AI agent and ask them if they want to help with tasks related to the company.
+    """
