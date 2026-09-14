@@ -12,7 +12,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Your FPT AI Assistant',
+      title: 'OUR FPT AI Assistant',
 
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(

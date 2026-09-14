@@ -6,23 +6,28 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from Retrieval.Storage import Storage, SearchResult
+
 from LLM.RAG import RAG
-from LLM.QueryRoute import QueryRoute, QueryType
+from LLM.QueryRoute import QueryRoute, QueryRouteFPT, QueryType
 from LLM.QueryResolver import ResolvedQuery
+
 from Tools.CodeExecutor import Language
 from Tools.WebSearch import WebSearch
 
 class Chatbot:
     '''Responsible for genereating a RAG pipeline'''
-    MAX_WEB_CONTEXT_CHARS = 15000
     EXECUTION_SERVICE_IP = "http://127.0.0.1:8000/execute"
 
-    def __init__(self, db: Storage, llm: ChatModel):
+    def __init__(self, db: Storage, llm: ChatModel,
+                 max_web_chars: int=15000):
         self.db = db
         self.llm = llm
         self.web_search = WebSearch()
         self.router = llm.with_structured_output(QueryRoute)
         self.query_resolver = llm.with_structured_output(ResolvedQuery)
+        self.router_fpt = llm.with_structured_output(QueryRouteFPT)
+
+        self.MAX_WEB_CONTEXT_CHARS = max_web_chars
 
         self.store = {}
 
@@ -56,7 +61,7 @@ class Chatbot:
 
             {query}
 
-            Again, no reference if the user question is CASUAL.
+            Again, no reference if the user wants to chat, question about compute and code.
 
             You may look at previous questions and answers for broader context.
             """
@@ -100,10 +105,23 @@ class Chatbot:
 
         return self.query_resolver.invoke(prompt)
 
-    def prepare_fpt_query(self, query: str, limit: int=5) -> str:
+    def eval_fpt_docs(self, query: str, src: str) -> QueryRouteFPT:
+        prompt = f"""
+            {RAG.router_fpt_prompt}
+
+            Query:
+            {query}
+
+            SOURCES:
+            {src}
+        """
+
+        return self.router_fpt.invoke(prompt)
+
+    def prepare_fpt_query(self, query: list[str], limit: int=5) -> str:
         results = self.db.search(
             query=query,
-            top_k=limit
+            limit=limit
         )
         return self.build_context(results=results)
 
@@ -196,11 +214,11 @@ class Chatbot:
             search_depth="basic"
         )
 
-        return (RAG.fpt_not_found_instruction, web_docs)
+        return (RAG.fpt_internal_not_found_instruction, web_docs)
 
-    def build_doc_context(self, resolved_query: str) -> str:
+    def build_web_context(self, query: str) -> str:
         retrieved_context = self.web_search.search(
-                        query=resolved_query,
+                        query=query,
                         max_results=5,
                         search_depth="basic"
                     )
@@ -233,34 +251,37 @@ class Chatbot:
         route_type = route.query_type
 
         if route_type == QueryType.FPT:
+
             yield {
                 "type": "status",
                 "stage": "document_search",
                 "message": "Searching database..."
             }
 
-            retrieved_context = self.prepare_fpt_query(query=resolved_query, limit=limit)
+            context = self.prepare_fpt_query(query=resolved_query, 
+                                             limit=limit)
 
-            if retrieved_context:
-                route_instruction, retrieved_context = self.build_fpt_instruction(retrieved_context=retrieved_context, 
-                                                                              resolved_query=resolved_query)
-            else:
+            yield {
+                "type": "status",
+                "stage": "document_extract",
+                "message": "Extracting documents..."
+            }
+            
+            ans = self.eval_fpt_docs(query=resolved_query, src=context)
+
+            if ans.lack_context:
                 yield {
                     "type": "status",
                     "stage": "web_search",
                     "message": "Searching the web..."
                 }
-            
-        elif route_type == QueryType.DOCUMENT:
-            yield {
-                "type": "status",
-                "stage": "web_search",
-                "message": "Searching the web..."
-            }
 
-            route_instruction = RAG.non_fpt_search_instruction
-            retrieved_context = self.build_doc_context(resolved_query=resolved_query)      
-
+                route_instruction = RAG.fpt_internal_not_found_instruction
+                retrieved_context = self.build_web_context(query=resolved_query)
+            else:
+                route_instruction, retrieved_context = self.build_fpt_instruction(retrieved_context=context, 
+                                                                                  resolved_query=resolved_query)
+                
         elif route_type == QueryType.COMPUTE:
             yield {
                 "type": "status",
@@ -285,11 +306,7 @@ class Chatbot:
             route_instruction = RAG.rubbish_instruction
             retrieved_context = ""
 
-        elif route_type == QueryType.LACK_CONTEXT:
-            route_instruction = RAG.lack_context_instruction
-            retrieved_context = ""
-
-        elif route_type == QueryType.GENERAL:
+        elif route_type == QueryType.CHIT_CHAT:
             route_instruction = RAG.casual_instruction
             retrieved_context = ""
 
@@ -300,7 +317,11 @@ class Chatbot:
         elif route_type == QueryType.HARMFUL:
             route_instruction = RAG.harmful_rejection
             retrieved_context = ""
-        
+
+        elif route_type == QueryType.OTHER:
+            route_instruction = RAG.other_instruction
+            retrieved_context = ""
+         
         else:
             yield {
                 "type": "content",
@@ -322,7 +343,7 @@ class Chatbot:
             RETRIEVED DATA:
             {retrieved_context}
 
-            CURRENT QUERY:
+            USER QUERY:
             {resolved_query}
 
             PREVIOUS CONVERSATION CONTEXT:
@@ -350,6 +371,8 @@ class Chatbot:
             }
         ):
             if chunk.content:
+                print(chunk.content, end="")
+
                 yield {
                     "type": "content",
                     "content": chunk.content

@@ -1,6 +1,8 @@
 import sys,bm25s, Stemmer
 import numpy as np
 
+import Tools.Math as math
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType, ScoredPoint
 from dotenv import load_dotenv
@@ -10,19 +12,31 @@ from langchain_openai import OpenAIEmbeddings
 from dataclasses import dataclass
 
 from Indexing.Parser import Chunk
+from Tools.Math import Stats, Standout_Category
 
 @dataclass
 class SearchResult:
     id: str
-    score: float
     payload: dict
 
     #debug
     semantic_rank: int=0
     bm25_rank: int=0
 
+    bm25_score: float=0.0
+    semantic_score: float=0.0
+    hybrid_score: float=0.0
+    mmr: float=0.0
+
+@dataclass
+class BM25SearchResult(SearchResult):
+    stat: Stats | None = None
+    standout: bool=False
+
 class Storage:
-    def __init__(self, collection_name: str="Documents"):
+    def __init__(self, collection_name: str="Documents",
+                 semantic_threshold: float=0.4,
+                 bm25_threshold=2.0):
         qdrant_api_keys_path = Path(".secrets/api_keys.secrets")
         load_dotenv(qdrant_api_keys_path)
         qdrant_api_key = getenv("QDRANT_API_KEY")
@@ -38,6 +52,9 @@ class Storage:
 
         self.COLLECTION_NAME = collection_name
         self.COLLECTION_SIZE = 1536
+
+        self.SEMANTIC_THRESHOLD = semantic_threshold
+        self.BM25_THRESHOLD = bm25_threshold
 
         if not self.client.collection_exists(self.COLLECTION_NAME):
             self.client.create_collection(
@@ -215,7 +232,7 @@ class Storage:
 
         return SearchResult(
             id=str(result.id),
-            score=0.0,
+            semantic_score=0.0,
             payload=result.payload or {}
         )
 
@@ -246,31 +263,11 @@ class Storage:
             str(result.id): np.asarray(result.vector, dtype=np.float32)
             for result in results
         }
-
-    def similarity_cosine(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
-        '''Return the cosine similarity between two vectors'''
-        mag1 = np.linalg.norm(vec1)
-        mag2 = np.linalg.norm(vec2)
-
-        if mag1 == 0.0 or mag2 == 0.0:
-            return 0.0
-
-        return float(np.dot(vec1, vec2) / (mag1 * mag2))
     
-    def search_semantic(self, query: str, limit: int=10, document_id: str | None=None) -> list[SearchResult]:
+    def search_semantic(self, query: str, limit: int=10) -> list[SearchResult]:
         '''Search for chunks relevant to the query.'''
         query_vector = self.embedding.embed_query(query)
         query_filter = None
-
-        if document_id is not None:
-            query_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="document_id",
-                        match=MatchValue(value=document_id)
-                    )
-                ]
-            )
 
         results = self.client.query_points(
             collection_name=self.COLLECTION_NAME,
@@ -283,13 +280,15 @@ class Storage:
         return [
             SearchResult(
                 id=str(result.id),
-                score=float(result.score),
+                semantic_score=float(result.score),
                 payload=result.payload
             )
-            for result in results.points
+            for result in results.points if result.score >= self.SEMANTIC_THRESHOLD
         ]
 
-    def search_bm25(self, query: str, limit: int=10, document_id: str | None = None) -> list[SearchResult]:
+    def search_bm25(self, query: str, limit: int=10) -> list[BM25SearchResult]:
+        '''Return a list of search results using BM25'''
+
         if self.bm25 is None:
             return []
 
@@ -309,30 +308,33 @@ class Storage:
         for index, score in zip(results[0], scores[0]):
             point = self.bm25_chunks[index]
 
-            if document_id is not None:
-                if point.payload.get("document_id") != document_id:
-                    continue
-
             search_results.append(
-                SearchResult(
+                BM25SearchResult(
                     id=str(point.id),
-                    score=float(score),
+                    bm25_score=float(score),
                     payload=point.payload
                 )
             )
 
+        standout_result = math.retrieve_stat(
+            scores=np.asarray(scores[0], dtype=np.float32)
+        )
+
+        if (
+                standout_result.z_score >= Standout_Category.WELL_ABOVE.value and
+                scores[0][0] >= self.BM25_THRESHOLD
+            ):
+            search_results[0].standout = True
+            search_results[0].stat = standout_result
+
         return search_results
 
-    def search_hybrid(self, query: str, k: float=60.0, limit: int=5, document_id: str | None = None) -> list[SearchResult]:
+    def search_hybrid(self, query: str, k: float=60.0, limit: int=5) -> list[SearchResult]:
         '''Hybrid search using RRF algorithm'''
 
         # Dense retrieval
-        semantic_results = self.search_semantic(query=query, limit=20, document_id=document_id)
-        bm25_results = self.search_bm25(query=query, limit=20, document_id=document_id)
-
-        # Sanity sort
-        semantic_results = sorted(semantic_results, key=lambda result: result.score, reverse=True)
-        bm25_results = sorted(bm25_results, key=lambda result: result.score, reverse=True)
+        semantic_results = self.search_semantic(query=query, limit=20)
+        bm25_results = self.search_bm25(query=query, limit=20)
 
         semantic_ranks = {
             result.id: rank
@@ -344,13 +346,16 @@ class Storage:
             for rank, result in enumerate(bm25_results, start=1)
         }
 
-        candidates = {}
+        candidates: dict[str, SearchResult] = {}
 
         for result in semantic_results:
             candidates[result.id] = result
 
         for result in bm25_results:
-            candidates[result.id] = result
+            if result.id not in candidates: 
+                candidates[result.id] = result
+            else:
+                candidates[result.id].bm25_score = result.bm25_score
 
         results = []
         for chunk_id, result in candidates.items():
@@ -364,26 +369,39 @@ class Storage:
                 bm25_rank = bm25_ranks[chunk_id]
                 score += 1.0 / (k + float(bm25_rank))
 
-            results.append(
-                SearchResult(
-                    id=result.id,
-                    score=score,
-                    payload=result.payload,
-                    semantic_rank=semantic_rank,
-                    bm25_rank=bm25_rank
+            if result.semantic_score >= self.SEMANTIC_THRESHOLD:
+                results.append(
+                    SearchResult(
+                        id=result.id,
+                        payload=result.payload,
+
+                        semantic_rank=semantic_ranks.get(chunk_id, 0),
+                        bm25_rank=bm25_ranks.get(chunk_id, 0),
+
+                        semantic_score=result.semantic_score,
+                        bm25_score=result.bm25_score,
+                        hybrid_score=score
+                    )
                 )
-            )
 
-        results.sort(key=lambda result: result.score, reverse=True)
+        results.sort(key=lambda result: result.hybrid_score, reverse=True)
+        results = results[:limit]
 
-        return results[:limit]
+        if (
+            bm25_results and
+            bm25_results[0].standout and
+            bm25_results[0].id not in {result.id for result in results}
+        ):
+            results.append(bm25_results[0])
+
+        return results
 
     def search_mmr(self, docs: list[SearchResult], landa: float=0.5, limit: int=10) -> list[SearchResult]:
         '''Re-rank and retrieved the sorted documents using MMR
             NOTE: Internal uses only
         '''
         documents = docs.copy()
-        documents.sort(key= lambda result: result.score, reverse=True)
+        documents.sort(key= lambda result: result.hybrid_score, reverse=True)
 
         vectors = self.get_vectors(document.id for document in documents)
 
@@ -394,7 +412,7 @@ class Storage:
 
             for i, document in enumerate(documents):
                 sims = [
-                    self.similarity_cosine(
+                    math.similarity_cosine(
                         vectors[s.id],
                         vectors[document.id]
                     )
@@ -402,12 +420,13 @@ class Storage:
                 ]
 
                 max_sim = max(sims) if sims else 0.0
-                mmr = landa * document.score - (1 - landa) * max_sim
+                mmr = landa * document.hybrid_score - (1 - landa) * max_sim
 
                 if (mmr > best_mmr):
                     best_mmr = mmr
                     best_i = i
 
+            documents[best_i].mmr = best_mmr
             S.append(documents.pop(best_i))
 
         return S
@@ -415,18 +434,17 @@ class Storage:
 
     def search(self, query: str,
                k=60.0, landa=0.5,
-               top_k=5,
-               document_id: str | None = None
+               limit=5
     ) -> list[SearchResult]:
         hybrid_results = self.search_hybrid(
             query=query,
-            limit=20,
-            document_id=document_id
+            limit=20, k=k
         )
 
         return self.search_mmr(
             docs=hybrid_results,
-            limit=top_k
+            landa=landa,
+            limit=limit
         )
 
                 

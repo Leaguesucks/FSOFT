@@ -74,9 +74,11 @@ class MessageBubble extends StatelessWidget {
 
                   extensionSet: md.ExtensionSet(
                     [
+                      ...md.ExtensionSet.gitHubWeb.blockSyntaxes,
                       LatexBlockSyntax(),
                     ],
                     [
+                      ...md.ExtensionSet.gitHubWeb.inlineSyntaxes,
                       LatexInlineSyntax(),
                     ],
                   ),

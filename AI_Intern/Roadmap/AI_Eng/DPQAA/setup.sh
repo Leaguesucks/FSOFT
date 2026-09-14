@@ -11,6 +11,7 @@ source .venv/bin/activate
 
 pip install fastapi uvicorn pydantic numpy
 pip install langchain langchain-core langchain-community langchain-openai
+pip install langgraph
 pip install dotenv 
 pip install llama-cloud qdrant-client
 pip install httpx tavily-python
