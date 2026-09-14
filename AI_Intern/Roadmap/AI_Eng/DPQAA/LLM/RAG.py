@@ -727,7 +727,7 @@ class RAG:
         Return only the structured result.
     """
 
-    casual_instruction = """
+    chitchat_instruction = """
         The users want to chat, so chatting with the users you shall be.
         Be as humourous as possible, but within professional boundary.
 
@@ -743,7 +743,7 @@ class RAG:
     """
 
     code_solver_instruction = """
-        Generate Python code for the follwing query. Return ONLY the code in PLAIN TEXT.
+        Generate Python code for the following query. Return ONLY the code in PLAIN TEXT.
     """
 
     rejection = """

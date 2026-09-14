@@ -2,32 +2,31 @@ import httpx
 
 from langchain_openai import ChatOpenAI as ChatModel
 from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 
 from Retrieval.Storage import Storage, SearchResult
-
 from LLM.RAG import RAG
 from LLM.QueryRoute import QueryRoute, QueryRouteFPT, QueryType
 from LLM.QueryResolver import ResolvedQuery
-
 from Tools.CodeExecutor import Language
 from Tools.WebSearch import WebSearch
 
+from Graph.State import ChatState
+
 class Chatbot:
     '''Responsible for genereating a RAG pipeline'''
+    MAX_WEB_CONTEXT_CHARS = 15000
     EXECUTION_SERVICE_IP = "http://127.0.0.1:8000/execute"
 
-    def __init__(self, db: Storage, llm: ChatModel,
-                 max_web_chars: int=15000):
+    def __init__(self, db: Storage, llm: ChatModel):
         self.db = db
         self.llm = llm
         self.web_search = WebSearch()
         self.router = llm.with_structured_output(QueryRoute)
         self.query_resolver = llm.with_structured_output(ResolvedQuery)
         self.router_fpt = llm.with_structured_output(QueryRouteFPT)
-
-        self.MAX_WEB_CONTEXT_CHARS = max_web_chars
 
         self.store = {}
 
@@ -61,7 +60,7 @@ class Chatbot:
 
             {query}
 
-            Again, no reference if the user wants to chat, question about compute and code.
+            Again, no reference if the user question is CASUAL.
 
             You may look at previous questions and answers for broader context.
             """
@@ -75,6 +74,211 @@ class Chatbot:
             input_messages_key="query",
             history_messages_key="history"
         )
+
+        ##################################################
+        self.checkpointer = MemorySaver()
+        self.graph = self.build_graph()
+
+    def build_graph(self):
+        graph = StateGraph(ChatState)
+
+        graph.add_node("resolve", self.resolve_node)
+        graph.add_node("route", self.route_node)
+
+        graph.add_node("fpt_search", self.fpt_search_node)
+        graph.add_node("fpt_retrieved", self.fpt_retrieved_node)
+        graph.add_node("web_search", self.web_search_node)
+
+        graph.add_node("compute", self.compute_node)
+        graph.add_node("code", self.code_node)
+        graph.add_node("prepare", self.prepare_node)
+        graph.add_node("generate", self.generate_node)
+
+        graph.add_edge(START, "resolve")
+        graph.add_edge("resolve", "route")
+
+        graph.add_conditional_edges(
+            "route",
+            self.route_decision,
+            {
+                "fpt": "fpt_search",
+                "compute": "compute",
+                "code": "code",
+                "direct": "prepare"
+            }
+        )
+
+        graph.add_edge("fpt_search", "fpt_retrieved")
+
+        graph.add_conditional_edges(
+            "fpt_retrieved",
+            self.is_src_enough,
+            {
+                "yes": "prepare",
+                "no": "web_search"
+            }
+        )
+
+        graph.add_edge("web_search", "prepare")
+
+        graph.add_edge("compute", "prepare")
+        graph.add_edge("code", "prepare")
+
+        graph.add_edge("prepare", "generate")
+        graph.add_edge("generate", END)
+
+        return graph.compile(checkpointer=self.checkpointer)
+
+    def resolve_node(self, state: ChatState):
+        messages = state["messages"]
+
+        conversation = "\n".join(
+            f"{message.type}: {message.content}"
+            for message in messages
+        )
+
+        latest_query = messages[-1].content
+
+        prompt = f"""
+            {RAG.history_resolver_prompt}
+
+            CONVERSATION:
+            {conversation}
+
+            USER'S LATEST QUERY:
+            {latest_query}    
+        """
+
+        resolved = self.query_resolver.invoke(prompt)
+
+        return {
+            "resolved_query": resolved.query,
+            "previous_context": resolved.context
+        }
+
+    def route_node(self, state: ChatState):
+        query = state["resolved_query"]
+
+        prompt = f"""
+            {RAG.router_prompt}
+
+            USER QUERY:
+            {query}
+        """
+
+        route = self.router.invoke(prompt)
+        route_type: QueryType = route.query_type
+
+        result = {
+            "route": route_type
+        }
+
+        match route_type:
+            case QueryType.CODE:
+                result["route_instruction"] = RAG.code_instruction
+            case QueryType.CHIT_CHAT:
+                result["route_instruction"] = RAG.chitchat_instruction
+            case QueryType.GREETING:
+                result["route_instruction"] = RAG.greeting_instruction
+            case QueryType.RUBBISH:
+                result["route_instruction"] = RAG.rubbish_instruction
+            case QueryType.HARMFUL:
+                result["route_instruction"] = RAG.harmful_rejection
+            case QueryType.OTHER:
+                result["route_instruction"] = RAG.other_instruction
+
+        return result
+
+    def route_decision(self, state: ChatState):
+        route = state["route"]
+
+        match route:
+            case QueryType.FPT:
+                return "fpt"
+            case QueryType.COMPUTE:
+                return "compute"
+            case QueryType.CODE:
+                return "code"
+            case _:
+                return "direct"
+
+    def fpt_search_node(self, state: ChatState):
+        query = state["resolved_query"]
+
+        results = self.db.search(
+            query=query,
+            limit=5
+        )
+
+        retrieved_context = self.build_context(results=results)
+
+        return {
+            "retrieved_context": retrieved_context
+        }
+
+    def fpt_retrieved_node(self, state: ChatState):
+        context = state["retrieved_context"]
+        query = state["resolved_query"]
+    
+        prompt = f"""
+            {RAG.router_fpt_prompt}
+
+            Query:
+            {query}
+
+            SOURCES:
+            {context}
+        """
+
+        return {
+            "lack_context": self.router_fpt.invoke(prompt).lack_context
+        }
+
+    def is_src_enough(self, state: ChatState):
+        lack_context = state["lack_context"]
+
+        return "no" if lack_context else "yes"
+
+    def web_search_node(self, state: ChatState):
+        query = state["resolved_query"]
+
+        retrieved_context = self.web_search.search(
+            query=query,
+            max_results=5,
+            search_depth="basic"
+        )
+
+        if len(retrieved_context) > self.MAX_WEB_CONTEXT_CHARS:
+            retrieved_context = (retrieved_context[:self.MAX_WEB_CONTEXT_CHARS]
+                                 + "\n[Web search results truncated]")
+
+        return {
+            "route_instruction": RAG.fpt_internal_not_found_instruction,
+            "retrieved_context": retrieved_context
+        }
+
+    def compute_node(self, state: ChatState):
+        query = state["resolved_query"]
+
+        prompt = f"""
+            {RAG.code_solver_instruction}
+
+            USER'S QUERY:
+            {query}
+        """
+
+        code = self.llm.invoke(prompt).content
+        execution = self.execute_python(code)
+
+        if execution["exit_code"] != 0:
+            return {
+                "retrieved_context"
+            }
+
+
+        
+
+    ###########################################################################
 
     def get_session_history(self, session_id: str) -> InMemoryChatMessageHistory:
         if session_id not in self.store:
@@ -105,23 +309,10 @@ class Chatbot:
 
         return self.query_resolver.invoke(prompt)
 
-    def eval_fpt_docs(self, query: str, src: str) -> QueryRouteFPT:
-        prompt = f"""
-            {RAG.router_fpt_prompt}
-
-            Query:
-            {query}
-
-            SOURCES:
-            {src}
-        """
-
-        return self.router_fpt.invoke(prompt)
-
-    def prepare_fpt_query(self, query: list[str], limit: int=5) -> str:
+    def prepare_fpt_query(self, query: str, limit: int=5) -> str:
         results = self.db.search(
             query=query,
-            limit=limit
+            top_k=limit
         )
         return self.build_context(results=results)
 
@@ -214,11 +405,11 @@ class Chatbot:
             search_depth="basic"
         )
 
-        return (RAG.fpt_internal_not_found_instruction, web_docs)
+        return (RAG.fpt_not_found_instruction, web_docs)
 
-    def build_web_context(self, query: str) -> str:
+    def build_doc_context(self, resolved_query: str) -> str:
         retrieved_context = self.web_search.search(
-                        query=query,
+                        query=resolved_query,
                         max_results=5,
                         search_depth="basic"
                     )
@@ -251,37 +442,24 @@ class Chatbot:
         route_type = route.query_type
 
         if route_type == QueryType.FPT:
-
             yield {
                 "type": "status",
                 "stage": "document_search",
                 "message": "Searching database..."
             }
 
-            context = self.prepare_fpt_query(query=resolved_query, 
-                                             limit=limit)
+            retrieved_context = self.prepare_fpt_query(query=resolved_query, limit=limit)
 
-            yield {
-                "type": "status",
-                "stage": "document_extract",
-                "message": "Extracting documents..."
-            }
-            
-            ans = self.eval_fpt_docs(query=resolved_query, src=context)
-
-            if ans.lack_context:
+            if retrieved_context:
+                route_instruction, retrieved_context = self.build_fpt_instruction(retrieved_context=retrieved_context, 
+                                                                              resolved_query=resolved_query)
+            else:
                 yield {
                     "type": "status",
                     "stage": "web_search",
                     "message": "Searching the web..."
-                }
+                }     
 
-                route_instruction = RAG.fpt_internal_not_found_instruction
-                retrieved_context = self.build_web_context(query=resolved_query)
-            else:
-                route_instruction, retrieved_context = self.build_fpt_instruction(retrieved_context=context, 
-                                                                                  resolved_query=resolved_query)
-                
         elif route_type == QueryType.COMPUTE:
             yield {
                 "type": "status",
@@ -306,8 +484,12 @@ class Chatbot:
             route_instruction = RAG.rubbish_instruction
             retrieved_context = ""
 
-        elif route_type == QueryType.CHIT_CHAT:
-            route_instruction = RAG.casual_instruction
+        elif route_type == QueryType.LACK_CONTEXT:
+            route_instruction = RAG.lack_context_instruction
+            retrieved_context = ""
+
+        elif route_type == QueryType.GENERAL:
+            route_instruction = RAG.chitchat_instruction
             retrieved_context = ""
 
         elif route_type == QueryType.GREETING:
@@ -317,11 +499,7 @@ class Chatbot:
         elif route_type == QueryType.HARMFUL:
             route_instruction = RAG.harmful_rejection
             retrieved_context = ""
-
-        elif route_type == QueryType.OTHER:
-            route_instruction = RAG.other_instruction
-            retrieved_context = ""
-         
+        
         else:
             yield {
                 "type": "content",
@@ -343,7 +521,7 @@ class Chatbot:
             RETRIEVED DATA:
             {retrieved_context}
 
-            USER QUERY:
+            CURRENT QUERY:
             {resolved_query}
 
             PREVIOUS CONVERSATION CONTEXT:
@@ -371,8 +549,6 @@ class Chatbot:
             }
         ):
             if chunk.content:
-                print(chunk.content, end="")
-
                 yield {
                     "type": "content",
                     "content": chunk.content
