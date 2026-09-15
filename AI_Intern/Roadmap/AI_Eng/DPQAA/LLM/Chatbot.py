@@ -1,15 +1,23 @@
 import httpx
 
 from langchain_openai import ChatOpenAI as ChatModel
-from langchain_core.chat_history import InMemoryChatMessageHistory
+
+from langchain.messages import SystemMessage, HumanMessage, AIMessage
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.config import get_stream_writer
+from langgraph.types import Send
+
+from IPython.display import Image, display
 
 from Retrieval.Storage import Storage, SearchResult
 from LLM.RAG import RAG
-from LLM.QueryRoute import QueryRoute, QueryRouteFPT, QueryType
-from LLM.QueryResolver import ResolvedQuery
+
+from Query.QueryRoute import QueryRoute, QueryRouteFPT, QueryType
+from Query.QueryResolver import ResolvedQuery
+from Query.QueryParallelizer import QueryPlan
+
 from Tools.CodeExecutor import Language
 from Tools.WebSearch import WebSearch
 
@@ -17,7 +25,7 @@ from Graph.State import ChatState
 
 class Chatbot:
     '''Responsible for genereating a RAG pipeline'''
-    MAX_WEB_CONTEXT_CHARS = 15000
+    MAX_WEB_CONTEXT_CHARS = 10000
     EXECUTION_SERVICE_IP = "http://127.0.0.1:8000/execute"
 
     def __init__(self, db: Storage, llm: ChatModel):
@@ -27,55 +35,8 @@ class Chatbot:
         self.router = llm.with_structured_output(QueryRoute)
         self.query_resolver = llm.with_structured_output(ResolvedQuery)
         self.router_fpt = llm.with_structured_output(QueryRouteFPT)
+        self.decomposer = llm.with_structured_output(QueryPlan)
 
-        self.store = {}
-
-        self.prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            f"""
-            You are an internal FPT Software policy assistant.
-
-            You must follow these rules:
-
-            {RAG.rules}
-
-            Stylish your answers using Markdown following these rules:
-            {RAG.markdown_rules}
-
-            Stylish the Math expressions following these rules:
-            {RAG.math_rules}
-            """
-        ),
-
-        MessagesPlaceholder(variable_name="history"),
-        (
-            "human",
-            """
-            Retrieved document context. Ignore this if the user query is casual (e.g., not a query that need searching):
-
-            {context}
-
-            User question:
-
-            {query}
-
-            Again, no reference if the user question is CASUAL.
-
-            You may look at previous questions and answers for broader context.
-            """
-        )])
-
-        self.chain = self.prompt | self.llm
-
-        self.conversation = RunnableWithMessageHistory(
-            self.chain,
-            get_session_history=self.get_session_history,
-            input_messages_key="query",
-            history_messages_key="history"
-        )
-
-        ##################################################
         self.checkpointer = MemorySaver()
         self.graph = self.build_graph()
 
@@ -83,53 +44,33 @@ class Chatbot:
         graph = StateGraph(ChatState)
 
         graph.add_node("resolve", self.resolve_node)
-        graph.add_node("route", self.route_node)
-
-        graph.add_node("fpt_search", self.fpt_search_node)
-        graph.add_node("fpt_retrieved", self.fpt_retrieved_node)
-        graph.add_node("web_search", self.web_search_node)
-
-        graph.add_node("compute", self.compute_node)
-        graph.add_node("code", self.code_node)
+        graph.add_node("decompose", self.decompose_node)
+        graph.add_node("execute_task", self.execute_task)
         graph.add_node("prepare", self.prepare_node)
         graph.add_node("generate", self.generate_node)
 
         graph.add_edge(START, "resolve")
-        graph.add_edge("resolve", "route")
+        graph.add_edge("resolve", "decompose")
 
         graph.add_conditional_edges(
-            "route",
-            self.route_decision,
-            {
-                "fpt": "fpt_search",
-                "compute": "compute",
-                "code": "code",
-                "direct": "prepare"
-            }
+            "decompose",
+            self.fan_out
         )
 
-        graph.add_edge("fpt_search", "fpt_retrieved")
-
-        graph.add_conditional_edges(
-            "fpt_retrieved",
-            self.is_src_enough,
-            {
-                "yes": "prepare",
-                "no": "web_search"
-            }
-        )
-
-        graph.add_edge("web_search", "prepare")
-
-        graph.add_edge("compute", "prepare")
-        graph.add_edge("code", "prepare")
-
+        graph.add_edge("execute_task", "prepare")
         graph.add_edge("prepare", "generate")
         graph.add_edge("generate", END)
 
-        return graph.compile(checkpointer=self.checkpointer)
+        return graph.compile(
+            checkpointer=self.checkpointer
+        )
 
     def resolve_node(self, state: ChatState):
+        self.emit_status(
+            stage="resolve",
+            message="Resolving query..."
+        )
+
         messages = state["messages"]
 
         conversation = "\n".join(
@@ -156,175 +97,164 @@ class Chatbot:
             "previous_context": resolved.context
         }
 
-    def route_node(self, state: ChatState):
-        query = state["resolved_query"]
-
-        prompt = f"""
-            {RAG.router_prompt}
-
-            USER QUERY:
-            {query}
-        """
-
-        route = self.router.invoke(prompt)
-        route_type: QueryType = route.query_type
-
-        result = {
-            "route": route_type
-        }
-
-        match route_type:
-            case QueryType.CODE:
-                result["route_instruction"] = RAG.code_instruction
-            case QueryType.CHIT_CHAT:
-                result["route_instruction"] = RAG.chitchat_instruction
-            case QueryType.GREETING:
-                result["route_instruction"] = RAG.greeting_instruction
-            case QueryType.RUBBISH:
-                result["route_instruction"] = RAG.rubbish_instruction
-            case QueryType.HARMFUL:
-                result["route_instruction"] = RAG.harmful_rejection
-            case QueryType.OTHER:
-                result["route_instruction"] = RAG.other_instruction
-
-        return result
-
-    def route_decision(self, state: ChatState):
-        route = state["route"]
-
-        match route:
-            case QueryType.FPT:
-                return "fpt"
-            case QueryType.COMPUTE:
-                return "compute"
-            case QueryType.CODE:
-                return "code"
-            case _:
-                return "direct"
-
-    def fpt_search_node(self, state: ChatState):
-        query = state["resolved_query"]
-
-        results = self.db.search(
-            query=query,
-            limit=5
+    def decompose_node(self, state: ChatState):
+        self.emit_status(
+            stage="decompose",
+            message="Breaking query into tasks..."
         )
 
-        retrieved_context = self.build_context(results=results)
-
-        return {
-            "retrieved_context": retrieved_context
-        }
-
-    def fpt_retrieved_node(self, state: ChatState):
-        context = state["retrieved_context"]
-        query = state["resolved_query"]
-    
-        prompt = f"""
-            {RAG.router_fpt_prompt}
-
-            Query:
-            {query}
-
-            SOURCES:
-            {context}
-        """
-
-        return {
-            "lack_context": self.router_fpt.invoke(prompt).lack_context
-        }
-
-    def is_src_enough(self, state: ChatState):
-        lack_context = state["lack_context"]
-
-        return "no" if lack_context else "yes"
-
-    def web_search_node(self, state: ChatState):
-        query = state["resolved_query"]
-
-        retrieved_context = self.web_search.search(
-            query=query,
-            max_results=5,
-            search_depth="basic"
-        )
-
-        if len(retrieved_context) > self.MAX_WEB_CONTEXT_CHARS:
-            retrieved_context = (retrieved_context[:self.MAX_WEB_CONTEXT_CHARS]
-                                 + "\n[Web search results truncated]")
-
-        return {
-            "route_instruction": RAG.fpt_internal_not_found_instruction,
-            "retrieved_context": retrieved_context
-        }
-
-    def compute_node(self, state: ChatState):
         query = state["resolved_query"]
 
         prompt = f"""
-            {RAG.code_solver_instruction}
+            {RAG.query_parallelizer_prompt}
 
             USER'S QUERY:
             {query}
         """
 
-        code = self.llm.invoke(prompt).content
-        execution = self.execute_python(code)
+        plan = self.decomposer.invoke(prompt)
+        tasks = plan.tasks
 
-        if execution["exit_code"] != 0:
-            return {
-                "retrieved_context"
-            }
+        if not tasks:
+            tasks = [query]
 
+        return {
+            "tasks": tasks
+        }
 
-        
-
-    ###########################################################################
-
-    def get_session_history(self, session_id: str) -> InMemoryChatMessageHistory:
-        if session_id not in self.store:
-            self.store[session_id] = (InMemoryChatMessageHistory())
-
-        return self.store[session_id]
-
-    def get_history_text(self, session_id: str="user_123") -> str:
-        history = self.get_session_history(session_id=session_id)
-        parts = []
-
-        for message in history.messages:
-            parts.append(f"{message.type}: {message.content}")
-
-        return "\n".join(parts)
-
-    def resolve_query(self, query: str, session_id: str="user_123") -> ResolvedQuery:
-        history = self.get_history_text(session_id=session_id)
-        prompt = f"""
-            {RAG.history_resolver_prompt}
-
-            CONVERSATION:
-            {history}
-
-            USER's LATEST MESSAGE:
-            {query}
-        """
-
-        return self.query_resolver.invoke(prompt)
-
-    def prepare_fpt_query(self, query: str, limit: int=5) -> str:
-        results = self.db.search(
-            query=query,
-            top_k=limit
+    def prepare_node(self, state: ChatState):
+        self.emit_status(
+            stage="prepare",
+            message="Preparing response..."
         )
-        return self.build_context(results=results)
 
-    def classify_query(self, query: str) -> QueryRoute:
-        prompt = f"""
-        {RAG.router_prompt}
+        task_sections = []
 
-        USER QUERY:
-        {query}
+        for index, result in enumerate(state.get("task_results", []), start=1):
+            task_sections.append(
+                f"""
+                    TASK {index}
+
+                    USER'S TASK:
+                    {result["task"]}
+
+                    ROUTE:
+                    {result["route"]}
+
+                    INSTRUCTION:
+                    {result["instruction"]}
+
+                    RETRIEVED DATA:
+                    {result["context"]}
+                """
+            )
+
+        generation_context = "\n".join(task_sections)
+        generation_context += f"""
+            PREVIOUS CONVERSATION CONTEXT:
+            {state.get("previous_context", "")}
         """
-        return self.router.invoke(prompt)
 
+        return {
+            "generation_context": generation_context
+        }
+
+    def generate_node(self, state: ChatState):
+        self.emit_status(
+            stage="generate",
+            message="Generating response..."
+        )
+
+        system_message = SystemMessage(
+            content=f"""
+                You are an internal FPT Software policy assistant.
+
+                You must follow these rules:
+                {RAG.rules}
+
+                Stylish your answers using Markdown following these rules:
+                {RAG.markdown_rules}
+
+                Stylish Math expression following these rules:
+                {RAG.math_rules}
+
+                Cite the sources following these rules:
+                {RAG.cite_rules}
+            """
+        )
+
+        user_message = HumanMessage(
+            content = f"""
+                {state["generation_context"]}
+
+                USER QUESTION:
+                {state["resolved_query"]}
+            """
+        )
+
+        messages = [
+            system_message,
+            *state["messages"],
+            user_message
+        ]
+
+        writer = get_stream_writer()
+        full_response = []
+
+        for chunk in self.llm.stream(messages):
+            if not chunk.content:
+                continue
+
+            content = chunk.content
+            full_response.append(content)
+
+            writer({
+                "type": "content",
+                "content": content
+            })
+
+        response = "".join(full_response)
+
+        writer({
+            "type": "done"
+        })
+
+        return {
+            "messages": [
+                AIMessage(content=response)
+            ],
+            "response": response
+        }
+
+    def stream(self, query: str, user_id: str, session_id: str):
+        state = {
+            "messages": [HumanMessage(content=query)],
+            "user_id": user_id,
+            "session_id": session_id
+        }
+
+        config = {
+            "configurable": {
+                "thread_id": session_id
+            }
+        }
+
+        for event in self.graph.stream(
+            state,
+            config=config,
+            stream_mode="custom"
+        ):
+            yield event
+
+    def emit_status(self, stage: str, message: str):
+        writer = get_stream_writer()
+
+        writer({
+            "type": "status",
+            "stage": stage,
+            "message": message
+        })
+        
     def build_context(self, results: list[SearchResult], max_chars_per_chunk: int=10000) -> str:
         '''Build full context based on the retrieved answer'''
         context_parts = []
@@ -365,11 +295,10 @@ class Chatbot:
 
             context_parts.append(source)
 
-        print("\n".join(context_parts))
-
         return "\n".join(context_parts)
 
     def execute_python(self, code: str):
+        '''Execute a python code and return the result'''
         response = httpx.post(
             self.EXECUTION_SERVICE_IP,
             json={
@@ -382,175 +311,204 @@ class Chatbot:
         response.raise_for_status()
         return response.json()
 
-    def write_code_and_compute(self, query: str) -> str:
-        prompt = f" {RAG.code_solver_instruction}\n User Query:\n {query}"
+    def draw_graph(self, file: str | None):
+        png = Image(self.graph.get_graph().draw_mermaid_png())
+
+        if file is None:
+            display(png)
+            return
+
+        with open(file, "wb") as f:
+            f.write(png)
+
+    def fan_out(self, state: ChatState):
+        return [
+            Send(
+                "execute_task",
+                {
+                    "task": task,
+                    "user_id": state["user_id"],
+                    "session_id": state["session_id"],
+                    "previous_context": state.get("previous_context", "")
+                }
+            )
+            for task in state["tasks"]
+        ]
+
+    def execute_task(self, state: ChatState):
+        task = state["task"]
+
+        self.emit_status(
+            stage="task_route",
+            message=f"Routing task: {task}"
+        )
+
+        route = self.router.invoke(
+            f"""
+                {RAG.router_prompt}
+
+                USER'S TASK:
+                {task}
+            """
+        )
+
+        match route.query_type:
+            case QueryType.FPT:
+                result = self.execute_fpt(task)
+            case QueryType.COMPUTE:
+                result = self.execute_compute(task)
+            case QueryType.CODE:
+                result = self.execute_code(task)
+            case _:
+                 result = self.execute_direct(task)
+
+        return {
+            "task_results": [
+                {
+                    "task": task,
+                    "route": route.query_type.value,
+                    "context": result.get("context", ""),
+                    "instruction": result.get("instruction", "")
+                }
+            ]
+        }
+
+    def execute_fpt(self, task: str):
+        self.emit_status(
+            stage="document_search",
+            message=f"Searching FPT documents: {task}"
+        )
+
+        results = self.db.search(
+            query=task,
+            limit=5
+        )
+
+        if not results:
+            return {
+                "context": "",
+                "instruction": RAG.fpt_internal_not_found_instruction
+            }
+
+        context = self.build_context(results)
+
+        # Check whether the retrieved information is sufficient
+        prompt = f"""
+            {RAG.router_fpt_prompt}
+
+            Query:
+            {task}
+
+            SOURCES:
+            {context}
+        """
+
+        self.emit_status(
+            stage="evaluate",
+            message="Evaluating..."
+        )
+
+        evaluation = self.router_fpt.invoke(prompt)
+
+        if evaluation.lack_context:
+            self.emit_status(
+                stage="web_search",
+                message=f"Searching web for: {task}"
+            )
+
+            context = self.web_search.search(
+                query=task,
+                max_results=5,
+                search_depth="advanced"
+            )
+
+            if len(context) > self.MAX_WEB_CONTEXT_CHARS:
+                context = (
+                    context[:self.MAX_WEB_CONTEXT_CHARS]
+                    + "\n[Web search results truncated]"
+                )
+
+            return {
+                "context": context,
+                "instruction": RAG.fpt_internal_not_found_instruction
+            }
+
+        return {
+            "context": context,
+            "instruction": ""
+        }
+
+    def execute_compute(self, task: str):
+        self.emit_status(
+            stage="compute",
+            message=f"Calculating: {task}"
+        )
+
+        prompt = f"""
+            {RAG.code_solver_instruction}
+
+            USER'S QUERY:
+            {task}
+        """
+
         code = self.llm.invoke(prompt).content
 
         execution = self.execute_python(code)
 
         if execution["exit_code"] != 0:
-            print(execution["stderr"])
-            return f"Say {RAG.rejection}"
+            return {
+                "context": RAG.rejection,
+                "instruction": (
+                    "Explain that the computation could not be completed."
+                )
+            }
 
-        return f"Say here is the answer to the query: {execution["stdout"]}\n User Query:\n {query}"
+        return {
+            "context": (
+                f"COMPUTATION RESULT:\n"
+                f"{execution['stdout']}"
+            ),
+            "instruction": (
+                "Answer the computational question using only "
+                "the provided computed result."
+            )
+        }
 
-    def build_fpt_instruction(self, retrieved_context: str, resolved_query: str) -> tuple[str, str]:
-        '''Helper function to build context and instruction for FPT related queries'''
-        if retrieved_context:
-            return (RAG.fpt_related_instruction, retrieved_context)
+    def execute_code(self, task: str):
+        return {
+            "context": "",
+            "instruction": RAG.code_instruction
+        }
 
-        web_docs = self.web_search.search(
-            query=resolved_query,
-            max_results=5,
-            search_depth="basic"
+    def execute_direct(self, task: str):
+        route = self.router.invoke(
+            f"""
+            {RAG.router_prompt}
+
+            USER'S TASK:
+            {task}
+            """
         )
 
-        return (RAG.fpt_not_found_instruction, web_docs)
+        instruction = ""
 
-    def build_doc_context(self, resolved_query: str) -> str:
-        retrieved_context = self.web_search.search(
-                        query=resolved_query,
-                        max_results=5,
-                        search_depth="basic"
-                    )
-        
-        if len(retrieved_context) > self.MAX_WEB_CONTEXT_CHARS: # Hard-code chunking, improve later
-            retrieved_context = (retrieved_context[:self.MAX_WEB_CONTEXT_CHARS]
-                                    + "\n[Web search results truncated]")
+        match route.query_type:
+            case QueryType.CHIT_CHAT:
+                instruction = RAG.chitchat_instruction
 
-        return retrieved_context
+            case QueryType.GREETING:
+                instruction = RAG.greeting_instruction
 
-    def answer_stream(self, query: str, limit: int=5, session_id:str="user_123"):
-        '''Stream the answer token-by-token'''
-        yield {
-            "type": "status",
-            "stage": "resolve",
-            "message": "Resolving query..."
+            case QueryType.RUBBISH:
+                instruction = RAG.rubbish_instruction
+
+            case QueryType.HARMFUL:
+                instruction = RAG.harmful_rejection
+
+            case QueryType.OTHER:
+                instruction = RAG.other_instruction
+
+        return {
+            "context": "",
+            "instruction": instruction
         }
-
-        resolved = self.resolve_query(query=query, session_id=session_id)
-        resolved_query = resolved.query
-        previous_context = resolved.context
-
-        yield {
-            "type": "status",
-            "stage": "route",
-            "message": "Routing query..."
-        }
-
-        route = self.classify_query(query=resolved_query)
-        route_type = route.query_type
-
-        if route_type == QueryType.FPT:
-            yield {
-                "type": "status",
-                "stage": "document_search",
-                "message": "Searching database..."
-            }
-
-            retrieved_context = self.prepare_fpt_query(query=resolved_query, limit=limit)
-
-            if retrieved_context:
-                route_instruction, retrieved_context = self.build_fpt_instruction(retrieved_context=retrieved_context, 
-                                                                              resolved_query=resolved_query)
-            else:
-                yield {
-                    "type": "status",
-                    "stage": "web_search",
-                    "message": "Searching the web..."
-                }     
-
-        elif route_type == QueryType.COMPUTE:
-            yield {
-                "type": "status",
-                "stage": "compute",
-                "message": "Calculating..."
-            }
-
-            route_instruction = "Answer the user's computational question using the provided computed result"
-            retrieved_context = self.write_code_and_compute(query=resolved_query)
-
-        elif route_type == QueryType.CODE:
-            yield {
-                "type": "status",
-                "stage": "code",
-                "message": "Generating code..."
-            }
-
-            route_instruction = RAG.code_instruction
-            retrieved_context = ""
-
-        elif route_type == QueryType.RUBBISH:
-            route_instruction = RAG.rubbish_instruction
-            retrieved_context = ""
-
-        elif route_type == QueryType.LACK_CONTEXT:
-            route_instruction = RAG.lack_context_instruction
-            retrieved_context = ""
-
-        elif route_type == QueryType.GENERAL:
-            route_instruction = RAG.chitchat_instruction
-            retrieved_context = ""
-
-        elif route_type == QueryType.GREETING:
-            route_instruction = RAG.greeting_instruction
-            retrieved_context = ""
-
-        elif route_type == QueryType.HARMFUL:
-            route_instruction = RAG.harmful_rejection
-            retrieved_context = ""
-        
-        else:
-            yield {
-                "type": "content",
-                "content": "I do not understand this query"
-            }
-
-            return
-
-        yield {
-            "type": "status",
-            "stage": "prepare",
-            "message": "Preparing response..."
-        }
-
-        context = f"""
-            ROUTING INSTRUCTION:
-            {route_instruction}
-
-            RETRIEVED DATA:
-            {retrieved_context}
-
-            CURRENT QUERY:
-            {resolved_query}
-
-            PREVIOUS CONVERSATION CONTEXT:
-            {previous_context}
-        """
-
-        # print(context, route_type) # Debug
-        # print(retrieved_context)
-
-        yield {
-            "type": "status",
-            "stage": "generate",
-            "message": "Generating response..."
-        }
-
-        for chunk in self.conversation.stream(
-            {
-                "query": query,
-                "context": context
-            },
-            config={
-                "configurable": {
-                    "session_id": session_id
-                }
-            }
-        ):
-            if chunk.content:
-                yield {
-                    "type": "content",
-                    "content": chunk.content
-                }
-

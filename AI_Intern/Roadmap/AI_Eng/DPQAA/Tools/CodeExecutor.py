@@ -4,7 +4,7 @@ from enum import Enum
 
 import subprocess
 import tempfile
-import os
+import os, sys
 
 class Language(Enum):
     '''For future development'''
@@ -43,7 +43,7 @@ class Executor:
                     f.write(request.code)
 
                 result = subprocess.run(
-                    ["python3", code_file],
+                    [sys.executable, code_file],
                     capture_output=True, text=True, timeout=5)
 
                 return Response(

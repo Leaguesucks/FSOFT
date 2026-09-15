@@ -15,6 +15,8 @@ class ChatType(str, Enum):
 class Item(BaseModel):
     text: str
     chat_type: ChatType
+    user_id: str
+    session_id: str
 
 class API:
     def __init__(self, chatBot: Chatbot):
@@ -36,13 +38,14 @@ class API:
     def root(self):
         return {"message": "Welcome to the API!"}
 
-    async def chat(self, item: Item):
+    def chat(self, item: Item):
         def generate():
-            for chunk in self.chatBot.answer_stream(
+            for event in self.chatBot.stream(
                 query=item.text,
-                session_id="user_123"
+                user_id=item.user_id,
+                session_id=item.session_id
             ):
-                yield json.dumps(chunk) + "\n"
+                yield json.dumps(event) + "\n"
 
         return StreamingResponse(
             generate(),

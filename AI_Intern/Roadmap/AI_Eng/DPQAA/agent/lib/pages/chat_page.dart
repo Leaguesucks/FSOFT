@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:uuid/uuid.dart';
 
 import '../services/chat_service.dart';
 import '../widgets/message_bubble.dart';
@@ -28,9 +29,24 @@ class _ChatPageState extends State<ChatPage> {
 
   final ChatService _chatService = ChatService();
 
+  // Temporary user ID.
+  // Later this should come from Google authentication.
+  final String _userId = "user_123";
+
+  // One session ID for this chat.
+  // Every message in this ChatPage uses the same session ID.
+  late final String _sessionId;
+
   bool _isThinking = false;
 
   String _thinkingStatus = "Thinking...";
+
+  @override
+  void initState() {
+    super.initState();
+
+    _sessionId = const Uuid().v4();
+  }
 
   Future<void> _sendMessage() async {
     final text = _textEditingController.text.trim();
@@ -58,6 +74,8 @@ class _ChatPageState extends State<ChatPage> {
 
       await _chatService.sendMessage(
         text,
+        userId: _userId,
+        sessionId: _sessionId,
 
         onStatus: (status) {
           if (!mounted) {
@@ -89,6 +107,18 @@ class _ChatPageState extends State<ChatPage> {
             } else {
               _messages.last["text"] += chunk;
             }
+          });
+
+          _scrollToBottom();
+        },
+
+        onDone: () {
+          if (!mounted) {
+            return;
+          }
+
+          setState(() {
+            _isThinking = false;
           });
 
           _scrollToBottom();

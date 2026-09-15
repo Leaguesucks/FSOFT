@@ -16,3 +16,5 @@ pip install dotenv
 pip install llama-cloud qdrant-client
 pip install httpx tavily-python
 pip install bm25s, PyStemmer
+
+pip install IPython

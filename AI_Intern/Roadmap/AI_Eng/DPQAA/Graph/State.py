@@ -1,9 +1,14 @@
 from typing import TypedDict, List, Annotated
+from operator import add
 
 from langgraph.graph import add_messages
 from langchain.messages import AnyMessage
 
-from LLM.QueryRoute import QueryType
+class TaskResult(TypedDict, total=False):
+    task: str
+    route: str
+    context: str
+    instruction: str
 
 class ChatState(TypedDict, total=False):
     messages: Annotated[List[AnyMessage], add_messages]
@@ -14,7 +19,11 @@ class ChatState(TypedDict, total=False):
     resolved_query: str
     previous_context: str
 
-    route: QueryType
+    tasks: List[str]
+
+    task_results: Annotated[List[TaskResult], add]
+
+    route: str
 
     retrieved_context: str
     route_instruction: str

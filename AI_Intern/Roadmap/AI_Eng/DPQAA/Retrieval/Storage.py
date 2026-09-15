@@ -10,6 +10,7 @@ from os import getenv
 from pathlib import Path
 from langchain_openai import OpenAIEmbeddings
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 
 from Indexing.Parser import Chunk
 from Tools.Math import Stats, Standout_Category
@@ -79,6 +80,8 @@ class Storage:
         self.bm25 = None
         self.bm25_chunks = []
         self.build_bm25_index()
+
+        self.search_executor = ThreadPoolExecutor(max_workers=2)
 
     def build_bm25_index(self) -> None:
         '''Build an in-memory BM25 index from all chunks in Qdrant.'''
@@ -331,11 +334,21 @@ class Storage:
 
     def search_hybrid(self, query: str, k: float=60.0, limit: int=5) -> list[SearchResult]:
         '''Hybrid search using RRF algorithm'''
+        semantic_future = self.search_executor.submit(
+            self.search_semantic,
+            query,
+            20
+        )
 
-        # Dense retrieval
-        semantic_results = self.search_semantic(query=query, limit=20)
-        bm25_results = self.search_bm25(query=query, limit=20)
+        bm25_future = self.search_executor.submit(
+            self.search_bm25,
+            query,
+            20
+        )
 
+        semantic_results = semantic_future.result()
+        bm25_results = bm25_future.result()
+        
         semantic_ranks = {
             result.id: rank
             for rank, result in enumerate(semantic_results, start=1)
@@ -358,6 +371,7 @@ class Storage:
                 candidates[result.id].bm25_score = result.bm25_score
 
         results = []
+
         for chunk_id, result in candidates.items():
             score = 0.0
 
@@ -369,20 +383,19 @@ class Storage:
                 bm25_rank = bm25_ranks[chunk_id]
                 score += 1.0 / (k + float(bm25_rank))
 
-            if result.semantic_score >= self.SEMANTIC_THRESHOLD:
-                results.append(
-                    SearchResult(
-                        id=result.id,
-                        payload=result.payload,
+            results.append(
+                SearchResult(
+                    id=result.id,
+                    payload=result.payload,
 
-                        semantic_rank=semantic_ranks.get(chunk_id, 0),
-                        bm25_rank=bm25_ranks.get(chunk_id, 0),
+                    semantic_rank=semantic_ranks.get(chunk_id, 0),
+                    bm25_rank=bm25_ranks.get(chunk_id, 0),
 
-                        semantic_score=result.semantic_score,
-                        bm25_score=result.bm25_score,
-                        hybrid_score=score
-                    )
+                    semantic_score=result.semantic_score,
+                    bm25_score=result.bm25_score,
+                    hybrid_score=score
                 )
+            )
 
         results.sort(key=lambda result: result.hybrid_score, reverse=True)
         results = results[:limit]
@@ -431,7 +444,6 @@ class Storage:
 
         return S
 
-
     def search(self, query: str,
                k=60.0, landa=0.5,
                limit=5
@@ -441,10 +453,12 @@ class Storage:
             limit=20, k=k
         )
 
-        return self.search_mmr(
+        mmr_results = self.search_mmr(
             docs=hybrid_results,
             landa=landa,
             limit=limit
         )
+
+        return [r for r in mmr_results if r.semantic_score >= self.SEMANTIC_THRESHOLD]
 
                 

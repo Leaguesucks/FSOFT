@@ -10,8 +10,12 @@ class ChatService {
 
   Future<void> sendMessage(
     String text, {
-    Function(String status)? onStatus,
-    Function(String chunk)? onChunk,
+      required String userId,
+      required String sessionId,
+  
+      Function(String status)? onStatus,
+      Function(String chunk)? onChunk,
+      Function() ? onDone,
   }) async {
     final request = http.Request(
       "POST",
@@ -23,13 +27,17 @@ class ChatService {
     request.body = jsonEncode({
       "text": text,
       "chat_type": "plain_text",
+      "user_id": userId,
+      "session_id": sessionId,
     });
 
     final response = await _client.send(request);
 
     if (response.statusCode != 200) {
+      final body = await response.stream.bytesToString();
+
       throw Exception(
-        "Server returned ${response.statusCode}",
+        "Server returned ${response.statusCode}: $body",
       );
     }
 
@@ -59,6 +67,8 @@ class ChatService {
           if (content is String) {
             onChunk?.call(content);
           }
+        } else if (type == "done") {
+          onDone?.call();
         }
       } catch (e) {
         debugPrint("Failed to parse server event: $line");

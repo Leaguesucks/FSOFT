@@ -1,5 +1,6 @@
-from tavily import TavilyClient
 import os
+
+from tavily import TavilyClient
 
 class WebSearch:
     MAX_CHARS_PER_RESULT = 5000
@@ -9,13 +10,16 @@ class WebSearch:
             api_key=os.environ["TAVILY_API_KEY"]
         )
 
-    def search(self, query: str, max_results: int=3, search_depth: str="basic") -> str:
+    def search(self, query: str, max_results: int=3, search_depth: str="advanced") -> str:
+        '''Search the web'''
         response = self.client.search(
             query=query,
             max_results=max_results,
             search_depth=search_depth,
             include_answer=False,
-            include_raw_content=True
+            include_raw_content=True,
+            include_domains=[],
+            exclude_domains=[]
         )
 
         results = response.get("results", [])
