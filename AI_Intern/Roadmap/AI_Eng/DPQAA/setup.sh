@@ -17,4 +17,4 @@ pip install llama-cloud qdrant-client
 pip install httpx tavily-python
 pip install bm25s, PyStemmer
 
-pip install IPython
+pip install IPython, langchain-groq, cerebras_cloud_sdk

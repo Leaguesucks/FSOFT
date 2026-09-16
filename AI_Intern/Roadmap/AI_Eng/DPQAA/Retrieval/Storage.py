@@ -36,7 +36,7 @@ class BM25SearchResult(SearchResult):
 
 class Storage:
     def __init__(self, collection_name: str="Documents",
-                 semantic_threshold: float=0.4,
+                 semantic_threshold: float=0.0,
                  bm25_threshold=2.0):
         qdrant_api_keys_path = Path(".secrets/api_keys.secrets")
         load_dotenv(qdrant_api_keys_path)

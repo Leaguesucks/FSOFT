@@ -1,6 +1,12 @@
-import httpx
+import httpx, os
+import LLM.RAG as RAG
 
-from langchain_openai import ChatOpenAI as ChatModel
+from dotenv import load_dotenv
+
+from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
+
+from langchain_core.messages.utils import trim_messages, count_tokens_approximately
 
 from langchain.messages import SystemMessage, HumanMessage, AIMessage
 
@@ -12,32 +18,52 @@ from langgraph.types import Send
 from IPython.display import Image, display
 
 from Retrieval.Storage import Storage, SearchResult
-from LLM.RAG import RAG
 
-from Query.QueryRoute import QueryRoute, QueryRouteFPT, QueryType
 from Query.QueryResolver import ResolvedQuery
-from Query.QueryParallelizer import QueryPlan
+from Query.QueryParallelizer import QueryPlan, RouteType
 
 from Tools.CodeExecutor import Language
 from Tools.WebSearch import WebSearch
 
-from Graph.State import ChatState
+from Graph.State import ChatState, FPTTaskState, ResultType, SearchType
 
 class Chatbot:
     '''Responsible for genereating a RAG pipeline'''
-    MAX_WEB_CONTEXT_CHARS = 10000
+    MAX_CHARS_PER_DOC = 5000
     EXECUTION_SERVICE_IP = "http://127.0.0.1:8000/execute"
 
-    def __init__(self, db: Storage, llm: ChatModel):
+    def __init__(self, db: Storage):
+        load_dotenv(".secrets/api_keys.secrets")
+
+        self.llm_main = ChatOpenAI(
+            model="gpt-5-nano",
+            api_key=os.getenv("OPENAI_API_KEY")
+        )
+
+        self.llm_second = ChatGroq(model="openai/gpt-oss-120b")
+
+        self.llm_third = ChatGroq(
+            model="openai/gpt-oss-20b",
+            max_tokens=1024
+        )
+
         self.db = db
-        self.llm = llm
         self.web_search = WebSearch()
-        self.router = llm.with_structured_output(QueryRoute)
-        self.query_resolver = llm.with_structured_output(ResolvedQuery)
-        self.router_fpt = llm.with_structured_output(QueryRouteFPT)
-        self.decomposer = llm.with_structured_output(QueryPlan)
+
+        # IF USE MAIN MODEL AS ROUTER, CHANGE METHOD TO function_call
+        # OTHERWISE, USE json_mode
+        self.query_resolver = self.llm_third.with_structured_output(
+            ResolvedQuery,
+            method="json_mode"
+        )
+        
+        self.decomposer = self.llm_third.with_structured_output(
+            QueryPlan,
+            method="json_mode"
+        )
 
         self.checkpointer = MemorySaver()
+        self.fpt_graph = self.build_fpt_graph()
         self.graph = self.build_graph()
 
     def build_graph(self):
@@ -45,25 +71,56 @@ class Chatbot:
 
         graph.add_node("resolve", self.resolve_node)
         graph.add_node("decompose", self.decompose_node)
-        graph.add_node("execute_task", self.execute_task)
-        graph.add_node("prepare", self.prepare_node)
-        graph.add_node("generate", self.generate_node)
+
+        graph.add_node(RouteType.SEARCH_FPT.value, self.fpt_graph)
+
+        graph.add_node(RouteType.COMPUTE.value, self.compute_node)
+        graph.add_node(RouteType.CODE.value, self.code_node)
+        graph.add_node(RouteType.GREETING.value, self.greet_node)
+        graph.add_node(RouteType.CHIT_CHAT.value, self.chit_chat_node)
+        graph.add_node(RouteType.HARMFUL.value, self.harmful_node)
+        graph.add_node(RouteType.OTHER.value, self.other_node)
+
+        graph.add_node("merge", self.merge_node)
 
         graph.add_edge(START, "resolve")
         graph.add_edge("resolve", "decompose")
 
         graph.add_conditional_edges(
             "decompose",
-            self.fan_out
+            self.fan_out_tasks
         )
 
-        graph.add_edge("execute_task", "prepare")
-        graph.add_edge("prepare", "generate")
-        graph.add_edge("generate", END)
+        graph.add_edge(RouteType.SEARCH_FPT.value, "merge")
+        graph.add_edge(RouteType.COMPUTE.value, "merge")
+        graph.add_edge(RouteType.CODE.value, "merge")
+        graph.add_edge(RouteType.GREETING.value, "merge")
+        graph.add_edge(RouteType.CHIT_CHAT.value, "merge")
+        graph.add_edge(RouteType.HARMFUL.value, "merge")
+        graph.add_edge(RouteType.OTHER.value, "merge")
+
+        graph.add_edge("merge", END)
 
         return graph.compile(
             checkpointer=self.checkpointer
         )
+
+    def build_fpt_graph(self):
+        graph = StateGraph(FPTTaskState)
+
+        graph.add_node("internal_search", self.search_internal_node)
+        graph.add_node("web_search", self.search_web_node)
+        graph.add_node("collect", self.collect_fpt_node)
+
+        graph.add_edge(START, "internal_search")
+        graph.add_edge(START, "web_search")
+
+        graph.add_edge("internal_search", "collect")
+        graph.add_edge("web_search", "collect")
+
+        graph.add_edge("collect", END)
+
+        return graph.compile()
 
     def resolve_node(self, state: ChatState):
         self.emit_status(
@@ -71,7 +128,14 @@ class Chatbot:
             message="Resolving query..."
         )
 
-        messages = state["messages"]
+        messages = trim_messages(
+            state["messages"],
+            strategy="last",
+            token_counter=count_tokens_approximately,
+            max_tokens=2000,
+            start_on="human",
+            include_system=True,
+        )
 
         conversation = "\n".join(
             f"{message.type}: {message.content}"
@@ -83,11 +147,19 @@ class Chatbot:
         prompt = f"""
             {RAG.history_resolver_prompt}
 
+            Again:
+            Return ONLY valid JSON in this exact structure:
+
+            {{
+                "query": "resolved user query",
+                "context": "relevant previous conversation context"
+            }}
+
             CONVERSATION:
             {conversation}
 
             USER'S LATEST QUERY:
-            {latest_query}    
+            {latest_query}
         """
 
         resolved = self.query_resolver.invoke(prompt)
@@ -108,6 +180,22 @@ class Chatbot:
         prompt = f"""
             {RAG.query_parallelizer_prompt}
 
+            Return ONLY valid JSON.
+
+            The route value MUST be one of:
+
+            - "search_fpt"
+            - "compute"
+            - "code"
+            - "greeting"
+            - "harmful"
+            - "chit_chat"
+            - "other"
+
+            IMPORTANT:
+            Use the exact lowercase values above.
+            Do NOT use enum names such as SEARCH_FPT or COMPUTE.
+
             USER'S QUERY:
             {query}
         """
@@ -116,114 +204,10 @@ class Chatbot:
         tasks = plan.tasks
 
         if not tasks:
-            tasks = [query]
+            tasks = {query: RouteType.OTHER}
 
         return {
             "tasks": tasks
-        }
-
-    def prepare_node(self, state: ChatState):
-        self.emit_status(
-            stage="prepare",
-            message="Preparing response..."
-        )
-
-        task_sections = []
-
-        for index, result in enumerate(state.get("task_results", []), start=1):
-            task_sections.append(
-                f"""
-                    TASK {index}
-
-                    USER'S TASK:
-                    {result["task"]}
-
-                    ROUTE:
-                    {result["route"]}
-
-                    INSTRUCTION:
-                    {result["instruction"]}
-
-                    RETRIEVED DATA:
-                    {result["context"]}
-                """
-            )
-
-        generation_context = "\n".join(task_sections)
-        generation_context += f"""
-            PREVIOUS CONVERSATION CONTEXT:
-            {state.get("previous_context", "")}
-        """
-
-        return {
-            "generation_context": generation_context
-        }
-
-    def generate_node(self, state: ChatState):
-        self.emit_status(
-            stage="generate",
-            message="Generating response..."
-        )
-
-        system_message = SystemMessage(
-            content=f"""
-                You are an internal FPT Software policy assistant.
-
-                You must follow these rules:
-                {RAG.rules}
-
-                Stylish your answers using Markdown following these rules:
-                {RAG.markdown_rules}
-
-                Stylish Math expression following these rules:
-                {RAG.math_rules}
-
-                Cite the sources following these rules:
-                {RAG.cite_rules}
-            """
-        )
-
-        user_message = HumanMessage(
-            content = f"""
-                {state["generation_context"]}
-
-                USER QUESTION:
-                {state["resolved_query"]}
-            """
-        )
-
-        messages = [
-            system_message,
-            *state["messages"],
-            user_message
-        ]
-
-        writer = get_stream_writer()
-        full_response = []
-
-        for chunk in self.llm.stream(messages):
-            if not chunk.content:
-                continue
-
-            content = chunk.content
-            full_response.append(content)
-
-            writer({
-                "type": "content",
-                "content": content
-            })
-
-        response = "".join(full_response)
-
-        writer({
-            "type": "done"
-        })
-
-        return {
-            "messages": [
-                AIMessage(content=response)
-            ],
-            "response": response
         }
 
     def stream(self, query: str, user_id: str, session_id: str):
@@ -255,7 +239,7 @@ class Chatbot:
             "message": message
         })
         
-    def build_context(self, results: list[SearchResult], max_chars_per_chunk: int=10000) -> str:
+    def build_context(self, results: list[SearchResult]) -> str:
         '''Build full context based on the retrieved answer'''
         context_parts = []
         root_index, sub_index = 0, 0
@@ -270,7 +254,7 @@ class Chatbot:
                 Section: {root_payload["title"]}
                 Page(s): {root_payload["pages"]}
 
-                {root_payload["full_content"]}
+                {root_payload["full_content"][:self.MAX_CHARS_PER_DOC]}
             """
 
             root_index += 1
@@ -286,7 +270,7 @@ class Chatbot:
 
                     {payload["content"]}\n
                 """
-                if current_size + len(sub) > max_chars_per_chunk:
+                if current_size + len(sub) > self.MAX_CHARS_PER_DOC:
                     break
 
                 current_size += len(sub)
@@ -321,61 +305,26 @@ class Chatbot:
         with open(file, "wb") as f:
             f.write(png)
 
-    def fan_out(self, state: ChatState):
-        return [
-            Send(
-                "execute_task",
-                {
-                    "task": task,
-                    "user_id": state["user_id"],
-                    "session_id": state["session_id"],
-                    "previous_context": state.get("previous_context", "")
-                }
-            )
-            for task in state["tasks"]
-        ]
+    def fan_out_tasks(self, state: ChatState):
+        '''Devide queries into sub-tasks'''
+        sends = []
 
-    def execute_task(self, state: ChatState):
+        for index, (task, route) in enumerate(state["tasks"].items(), start=1):
+            task_state = {
+                "task": task,
+                "task_id": index,
+            }
+
+            sends.append(Send(route.value, task_state))
+
+        return sends
+        
+    def search_internal_node(self, state: FPTTaskState):
         task = state["task"]
+        task_id = state["task_id"]
 
         self.emit_status(
-            stage="task_route",
-            message=f"Routing task: {task}"
-        )
-
-        route = self.router.invoke(
-            f"""
-                {RAG.router_prompt}
-
-                USER'S TASK:
-                {task}
-            """
-        )
-
-        match route.query_type:
-            case QueryType.FPT:
-                result = self.execute_fpt(task)
-            case QueryType.COMPUTE:
-                result = self.execute_compute(task)
-            case QueryType.CODE:
-                result = self.execute_code(task)
-            case _:
-                 result = self.execute_direct(task)
-
-        return {
-            "task_results": [
-                {
-                    "task": task,
-                    "route": route.query_type.value,
-                    "context": result.get("context", ""),
-                    "instruction": result.get("instruction", "")
-                }
-            ]
-        }
-
-    def execute_fpt(self, task: str):
-        self.emit_status(
-            stage="document_search",
+            stage="internal_search",
             message=f"Searching FPT documents: {task}"
         )
 
@@ -385,60 +334,138 @@ class Chatbot:
         )
 
         if not results:
-            return {
-                "context": "",
-                "instruction": RAG.fpt_internal_not_found_instruction
-            }
+            context = ""
+            sources = []
+        else:
+            context = self.build_context(results=results)
 
-        context = self.build_context(results)
-
-        # Check whether the retrieved information is sufficient
-        prompt = f"""
-            {RAG.router_fpt_prompt}
-
-            Query:
-            {task}
-
-            SOURCES:
-            {context}
-        """
-
-        self.emit_status(
-            stage="evaluate",
-            message="Evaluating..."
-        )
-
-        evaluation = self.router_fpt.invoke(prompt)
-
-        if evaluation.lack_context:
-            self.emit_status(
-                stage="web_search",
-                message=f"Searching web for: {task}"
-            )
-
-            context = self.web_search.search(
-                query=task,
-                max_results=5,
-                search_depth="advanced"
-            )
-
-            if len(context) > self.MAX_WEB_CONTEXT_CHARS:
-                context = (
-                    context[:self.MAX_WEB_CONTEXT_CHARS]
-                    + "\n[Web search results truncated]"
-                )
-
-            return {
-                "context": context,
-                "instruction": RAG.fpt_internal_not_found_instruction
-            }
-
+            sources = [
+                result.payload.get("document_name", "")
+                for result in results
+            ]
+            
         return {
-            "context": context,
-            "instruction": ""
+            "search_results": {
+                f"{task_id}: {SearchType.INTERNAL.value}":
+                {
+                    "content": context,
+                    "sources": sources,
+                }
+            }
         }
 
-    def execute_compute(self, task: str):
+    def search_web_node(self, state: FPTTaskState):
+        task = state["task"]
+        task_id = state["task_id"]
+
+        self.emit_status(
+            stage="web_search",
+            message=f"Searching web: {task}"
+        )
+
+        context = self.web_search.search(
+            query=task,
+            max_results=5,
+            search_depth="advanced"
+        )
+
+        if len(context) > self.MAX_CHARS_PER_DOC:
+            context = (
+                context[:self.MAX_CHARS_PER_DOC] + 
+                "\n[Webb search resultss truncated]"
+            )
+
+        return {
+            "search_results": {
+                f"{task_id}: {SearchType.WEB.value}":
+                    {
+                        "content": context,
+                        "sources": []
+                    }
+            }
+        }
+
+    def collect_fpt_node(self, state: FPTTaskState):
+        task = state["task"]
+        task_id = state["task_id"]
+
+        self.emit_status(
+            stage="collecting_documents",
+            message=f"Collecting doucuments: {task}"
+        )
+
+        search_results = state.get("search_results", {})
+
+        internal = search_results.get(
+            f"{task_id}: {SearchType.INTERNAL.value}",
+            {}
+        )
+
+        web = search_results.get(
+            f"{task_id}: {SearchType.WEB.value}",
+            {}
+        )
+
+        internal_content = internal.get("content", "")
+        web_content = web.get("content", "")
+
+        prompt = f"""
+            You are summarizing retrieved information for an FPT internal assistant.
+
+            USER TASK:
+            {task}
+
+            INTERNAL FPT DOCUMENTS:
+            {internal_content if internal_content else "[No relevant internal documents found]"}
+
+            WEB SEARCH RESULTS:
+            {web_content if web_content else "[No relevant web documents found]"}
+
+            INSTRUCTIONS:
+
+            1. Prefer INTERNAL FPT DOCUMENTS.
+            2. Use WEB SEARCH RESULTS only if the internal documents are insufficient.
+            3. If the internal documents are sufficient, answer using ONLY the internal
+            documents. Do not use the web results.
+            4. If the internal documents are insufficient, use the web results according
+            to the following rules:
+
+            {RAG.fpt_internal_not_found_instruction}
+
+            5. If neither source contains enough information to answer the task,
+            explicitly say that the information could not be found.
+            6. Do not invent information.
+            7. Preserve important details from the retrieved sources.
+            8. Keep the answer concise because your output will be passed to another
+            LLM for final answer generation.
+            9. Cite claims using [n] citations where possible. Do not invent citation number.
+
+            CITE RULE:
+            {RAG.cite_rules}
+        """
+
+        content = self.llm_main.invoke(prompt).content
+
+        task_result = {
+            "task_id": task_id,
+            "task": task,
+
+            "result_type": ResultType.DOCUMENTS.value,
+
+            "content": content,
+            "error": "",
+
+            "instruction": "Summarize the content"
+        }
+
+        return {
+            "task_results": [task_result]
+        }
+
+    def compute_node(self, state: ChatState):
+        task = state["task"]
+        task_id = state["task_id"]
+
         self.emit_status(
             stage="compute",
             message=f"Calculating: {task}"
@@ -451,64 +478,288 @@ class Chatbot:
             {task}
         """
 
-        code = self.llm.invoke(prompt).content
-
+        code = self.llm_second.invoke(prompt).content
         execution = self.execute_python(code)
 
         if execution["exit_code"] != 0:
-            return {
-                "context": RAG.rejection,
-                "instruction": (
-                    "Explain that the computation could not be completed."
-                )
-            }
+            return {"task_results": [{
+                "task_id": task_id,
+                "task": task,
+                "result_type": ResultType.ERROR.value,
+                "content": "",
+                "error": execution.get("stderr", "Computation failed.")
+            }]}
 
-        return {
-            "context": (
-                f"COMPUTATION RESULT:\n"
-                f"{execution['stdout']}"
+        payload = {
+            "task_id": task_id,
+            "task": task,
+
+            "result_type": ResultType.CANDIDATE_ANSWER.value,
+            "content": (
+                f"""Computed result:
+                {execution["stdout"]}"""
             ),
             "instruction": (
-                "Answer the computational question using only "
-                "the provided computed result."
+                "Use the computed result when answering the user's computational question."
             )
         }
 
-    def execute_code(self, task: str):
         return {
-            "context": "",
-            "instruction": RAG.code_instruction
+            "task_results": [payload]
         }
 
-    def execute_direct(self, task: str):
-        route = self.router.invoke(
-            f"""
-            {RAG.router_prompt}
+    def code_node(self, state: ChatState):
+        task = state["task"]
+        task_id = state["task_id"]
+
+        self.emit_status(
+            stage="code",
+            message=f"Generating code: {task}"
+        )
+
+        prompt = f"""
+            {RAG.code_instruction}
 
             USER'S TASK:
             {task}
+
+            Provide the requested code and a concise explanation.
+        """
+
+        candidate = self.llm_second.invoke(prompt)
+
+        payload = {
+            "task_id": task_id,
+            "task": task,
+            "result_type": ResultType.CANDIDATE_ANSWER.value,
+            "content": candidate.content
+        }
+
+        return {
+            "task_results": [payload]
+        }
+
+    def get_direct_candidate_answer(self, 
+                                    instruction: str, task: str,
+                                    task_id: int,
+                                    reject: bool=False) -> dict[str, str]:
+        '''Return candidate answers for direct queries'''
+        if reject:
+            inject = "Give a rejection for this task according to the following instruction: "
+        else:
+            inject = "Give a candidate answer for the following task"
+
+        prompt = f"""
+            {inject}
+
+            INSTRUCTION:
+            {instruction}
+
+            USER'S TASK:
+            {task}
+        """
+
+        candidate = self.llm_second.invoke(prompt)
+
+        return {
+            "task_id": task_id,
+            "task": task,
+
+            "result_type": ResultType.CANDIDATE_ANSWER.value,
+            "content": candidate.content,
+            "instruction": instruction
+        }
+
+    def greet_node(self, state: ChatState):
+        task = state["task"]
+        task_id = state["task_id"]
+
+        self.emit_status(
+            stage="greet",
+            message=f"Greeting user: {task}"
+        )
+
+        instruction = RAG.greeting_instruction
+
+        payload = self.get_direct_candidate_answer(
+            instruction=instruction, task=task, task_id=task_id
+        )
+
+        return {
+            "task_results": [payload]
+        }
+
+    def chit_chat_node(self, state: ChatState):
+        task = state["task"]
+        task_id = state["task_id"]
+
+        self.emit_status(
+            stage="chit_chat",
+            message=f"Chit chat with user: {task}"
+        )
+
+        instruction = RAG.chitchat_instruction
+
+        payload = self.get_direct_candidate_answer(
+            instruction=instruction, task=task, task_id=task_id
+        )
+
+        return {
+            "task_results": [payload]
+        }
+
+    def harmful_node(self, state: ChatState):
+        task = state["task"]
+        task_id = state["task_id"]
+
+        self.emit_status(
+            stage="harmful",
+            message=f"Rejecting: {task}"
+        )
+
+        instruction = RAG.harmful_rejection
+
+        payload = self.get_direct_candidate_answer(
+            instruction=instruction, task=task, task_id=task_id
+        )
+
+        return {
+            "task_results": [payload]
+        }
+
+    def other_node(self, state: ChatState):
+        task = state["task"]
+        task_id = state["task_id"]
+
+        self.emit_status(
+            stage="other",
+            message=f"Determining: {task}"
+        )
+
+        instruction = RAG.other_instruction
+
+        payload = self.get_direct_candidate_answer(
+            instruction=instruction, task=task, 
+            task_id=task_id, reject=True
+        )
+
+        return {
+            "task_results": [payload]
+        }
+
+    def merge_node(self, state: ChatState):
+        self.emit_status(
+            stage="merge",
+            message="Combining task results..."
+        )
+
+        task_results = sorted(
+            state.get("task_results", []),
+            key=lambda result: result.get("task_id", 0)
+        )
+
+        if not task_results:
+            return {
+                "response": "",
+                "messages": [
+                    AIMessage(content="")
+                ]
+            }
+
+        result_sections = []
+
+        for result in task_results:
+            result_type = result.get("result_type", "")
+
+            section = f"""
+                TASK {result.get("task_id", "?")}
+
+                USER'S TASK:
+                {result.get("task", "")}
+
+                RESULT TYPE:
+                {result_type}
+
+                CONTENT:
+                {result.get("content", "")}
+
+                INSTRUCTION:
+                {result.get("instruction", "")}
+
+                ERROR:
+                {result.get("error", "")}
+            """
+
+            result_sections.append(section)
+
+        task_context = "\n".join(result_sections)
+
+        system_message = SystemMessage(
+            content=f"""
+                You are the final response generator for an internal FPT 
+                Software AI assistant.
+
+                Your job is to compose ONE coherent answer to the user's 
+                original query from the independent task results provided 
+                to you.
+
+                You must follow these rules:
+                {RAG.rules}
+
+                Style your response using Markdown according to:
+                {RAG.markdown_rules}
+
+                Format mathematical expressions according to:
+                {RAG.math_rules}
+
+                Cite sources according to:
+                {RAG.cite_rules}
+
+                IMPORTANT: Result types
+                {RAG.result_types_rules}
+
+                Merge FPT documents for a final response using these rules:
+                {RAG.fpt_merge_instruction}
+
+                Final response rules:
+                {RAG.final_response_rules}
             """
         )
 
-        instruction = ""
+        user_message = HumanMessage(
+            content=f"""
+                ORIGINAL USER'S QUERY:
+                {state["resolved_query"]}
 
-        match route.query_type:
-            case QueryType.CHIT_CHAT:
-                instruction = RAG.chitchat_instruction
+                INDEPENDENT RESULTS:
+                {task_context}
+            """
+        )
 
-            case QueryType.GREETING:
-                instruction = RAG.greeting_instruction
+        messages = [system_message, user_message]
 
-            case QueryType.RUBBISH:
-                instruction = RAG.rubbish_instruction
+        writer = get_stream_writer()
+        full_response = []
 
-            case QueryType.HARMFUL:
-                instruction = RAG.harmful_rejection
+        for chunk in self.llm_second.stream(messages):
+            if not chunk.content:
+                continue
 
-            case QueryType.OTHER:
-                instruction = RAG.other_instruction
+            content = chunk.content
+            full_response.append(content)
+
+            writer({
+                "type": "content",
+                "content": content
+            })
+
+        response = "".join(full_response)
+
+        writer({"type": "done"})
 
         return {
-            "context": "",
-            "instruction": instruction
+            "messages": [
+                AIMessage(content=response)
+            ],
+            "response": response
         }
