@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from enum import Enum
 
-from LLM.Chatbot import Chatbot
+from Graph.graph.Graph_Main import Main_Graph
 
 class ChatType(str, Enum):
     PLAIN_TEXT = "plain_text"
@@ -19,7 +19,7 @@ class Item(BaseModel):
     session_id: str
 
 class API:
-    def __init__(self, chatBot: Chatbot):
+    def __init__(self, graph: Main_Graph=Main_Graph()):
         self.app = FastAPI()
 
         self.app.add_middleware(
@@ -33,14 +33,14 @@ class API:
         self.app.get("/")(self.root)
         self.app.post("/chat")(self.chat)
 
-        self.chatBot = chatBot
+        self.graph = graph
 
     def root(self):
         return {"message": "Welcome to the API!"}
 
     def chat(self, item: Item):
         def generate():
-            for event in self.chatBot.stream(
+            for event in self.graph.stream(
                 query=item.text,
                 user_id=item.user_id,
                 session_id=item.session_id
