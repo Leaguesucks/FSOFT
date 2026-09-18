@@ -1,11 +1,11 @@
+import LLM.Query.QueryParallelizer as qp
+
 from typing import TypedDict, List, Annotated, Dict
 from operator import add
 from enum import Enum
 
 from langgraph.graph import add_messages
 from langchain.messages import AnyMessage
-
-from Query.QueryParallelizer import RouteType
 
 def merge_search_results(
     left: dict[str, SearchTaskResult],
@@ -52,10 +52,12 @@ class ChatState(TypedDict, total=False):
     user_id: str
     session_id: str
 
+    resolve_status: str
+    rejection_reason: str
     resolved_query: str
     previous_context: str
 
-    tasks: Dict[str, RouteType]
+    tasks: List[qp.Task]
 
     task_results: Annotated[List[TaskResult], add]
 

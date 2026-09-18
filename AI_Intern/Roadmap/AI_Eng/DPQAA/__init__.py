@@ -48,6 +48,3 @@ if __name__ == "__main__":
     db = Storage()
 
     init_data(False)
-
-    
-
